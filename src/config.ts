@@ -28,6 +28,22 @@ export interface MinioConfig {
   region: string;
 }
 
+export interface FmpConfig {
+  apiKey: string;
+}
+
+export interface FinnhubConfig {
+  apiKey: string;
+}
+
+export interface AlphaVantageConfig {
+  apiKey: string;
+}
+
+export interface FredConfig {
+  apiKey: string;
+}
+
 const secureEnvPath = path.resolve(process.cwd(), 'secure', 'keys.env');
 
 if (fs.existsSync(secureEnvPath)) {
@@ -86,4 +102,44 @@ export function loadMinioConfig(): MinioConfig {
   }
 
   return { endpoint, accessKey, secretKey, bucket, region };
+}
+
+export function loadFmpConfig(): FmpConfig {
+  const apiKey = process.env.FMP_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('Falta FMP_API_KEY. Revisa .env o secure/keys.env.');
+  }
+
+  return { apiKey };
+}
+
+export function loadFinnhubConfig(): FinnhubConfig {
+  const apiKey = process.env.FINNHUB_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('Falta FINNHUB_API_KEY. Revisa .env o secure/keys.env.');
+  }
+
+  return { apiKey };
+}
+
+export function loadAlphaVantageConfig(): AlphaVantageConfig {
+  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('Falta ALPHA_VANTAGE_API_KEY. Revisa .env o secure/keys.env.');
+  }
+
+  return { apiKey };
+}
+
+export function loadFredConfig(): FredConfig {
+  const apiKey = process.env.FRED_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('Falta FRED_API_KEY. Revisa .env o secure/keys.env.');
+  }
+
+  return { apiKey };
 }
