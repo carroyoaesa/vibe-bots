@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+secure/*.env
+secure/*.json
+secure/*.key
+secure/*.secret
