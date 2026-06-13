@@ -12,7 +12,8 @@ Este proyecto contiene un bot inicial construido en TypeScript.
 ## Convenciones
 
 - Mantener `src/` como fuente principal del código.
-- Guardar las claves en `secure/keys.env` o en variables de entorno, nunca en el repositorio.
+- Guardar las claves de la app (Alpaca, PostgreSQL, Redis, MinIO) en `secure/keys.env` o en variables de entorno, nunca en el repositorio.
+- Las credenciales de Git/GitHub NO van en `secure/keys.env` ni en la URL del remoto: usar el credential helper de git (`~/.git-credentials`, configurado con `git config --global credential.helper store`).
 - Evitar dependencias innecesarias fuera de `devDependencies` para comenzar.
 - Documentar cualquier API externa o clave en `README.md`.
 
