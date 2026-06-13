@@ -57,6 +57,15 @@ MINIO_BUCKET=vibe-bots
 MINIO_REGION=us-east-1
 ```
 
+## Diagnóstico (`npm run dev`)
+
+`src/index.ts` ejecuta cuatro verificaciones independientes (Alpaca, PostgreSQL, Redis, MinIO) mediante `src/check-runner.ts`. Cada una corre de forma aislada: si una falla, las demás igual se ejecutan, y al final se muestra un resumen con el estado de cada servicio.
+
+- `src/services/alpaca.ts` - cliente Alpaca y verificación de cuenta.
+- `src/services/db.ts` - pool de PostgreSQL y verificación (crea/lee una fila de prueba).
+- `src/services/cache.ts` - cliente Redis y verificación (set/get de prueba).
+- `src/services/storage.ts` - cliente MinIO y verificación (bucket + objeto de prueba).
+
 ## Arquitectura para futuros agentes de código
 
 Este proyecto ya está preparado para evolucionar hacia:

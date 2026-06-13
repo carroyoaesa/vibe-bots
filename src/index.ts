@@ -1,79 +1,80 @@
-import { createAlpacaClient, loadAlpacaConfig, loadMinioConfig, loadPostgresConfig, loadRedisConfig } from './config';
-import axios from 'axios';
+import { loadAlpacaConfig, loadMinioConfig, loadPostgresConfig, loadRedisConfig } from './config';
+import { createAlpacaClient, verifyAlpaca } from './services/alpaca';
 import { createPostgresPool, verifyPostgres } from './services/db';
 import { createRedisClient, verifyRedis } from './services/cache';
 import { createMinioClient, verifyStorage } from './services/storage';
+import { runCheck } from './check-runner';
 
-async function verifyServices() {
-  try {
-    console.log('🚀 Vibe Bots iniciando...\n');
+async function main() {
+  console.log('🚀 Vibe Bots iniciando...\n');
 
-    // Cargar configuración
-    const alpacaConfig = loadAlpacaConfig();
-    const postgresConfig = loadPostgresConfig();
-    const redisConfig = loadRedisConfig();
-    const minioConfig = loadMinioConfig();
+  const alpacaConfig = loadAlpacaConfig();
+  const postgresConfig = loadPostgresConfig();
+  const redisConfig = loadRedisConfig();
+  const minioConfig = loadMinioConfig();
 
-    console.log(`✅ Configuración cargada`);
-    console.log(`   Alpaca: ${alpacaConfig.baseUrl}`);
-    console.log(`   PostgreSQL: ${postgresConfig.host}:${postgresConfig.port}/${postgresConfig.db}`);
-    console.log(`   Redis: ${redisConfig.url}`);
-    console.log(`   MinIO: ${minioConfig.endpoint}`);
-    console.log('');
+  console.log('✅ Configuración cargada');
+  console.log(`   Alpaca: ${alpacaConfig.baseUrl}`);
+  console.log(`   PostgreSQL: ${postgresConfig.host}:${postgresConfig.port}/${postgresConfig.db}`);
+  console.log(`   Redis: ${redisConfig.url}`);
+  console.log(`   MinIO: ${minioConfig.endpoint}\n`);
 
-    // Verificar Alpaca
-    console.log('═══════════════════════════════════════');
-    console.log('📊 VERIFICACIÓN 1: Alpaca');
-    console.log('═══════════════════════════════════════\n');
-    const alpacaClient = createAlpacaClient();
-    const accountResponse = await alpacaClient.get('/v2/account');
-    const account = accountResponse.data;
-    console.log(`   Cuenta: ${account.account_number}`);
-    console.log(`   Estado: ${account.status}`);
-    console.log(`   Efectivo: $${parseFloat(account.cash).toFixed(2)}`);
-    console.log(`   Poder de compra: $${parseFloat(account.buying_power).toFixed(2)}`);
-    console.log(`   Patrimonio neto: $${parseFloat(account.equity).toFixed(2)}\n`);
+  const results = [];
 
-    // Verificar PostgreSQL
-    console.log('═══════════════════════════════════════');
-    console.log('🗄️  VERIFICACIÓN 2: PostgreSQL');
-    console.log('═══════════════════════════════════════\n');
-    const pool = createPostgresPool(postgresConfig);
-    const postgresResult = await verifyPostgres(pool);
-    console.log(`   PostgreSQL OK: ${JSON.stringify(postgresResult)}`);
-    await pool.end();
-    console.log('');
+  results.push(
+    await runCheck('VERIFICACIÓN 1: Alpaca', '📊', async () => {
+      const client = createAlpacaClient(alpacaConfig);
+      return verifyAlpaca(client);
+    }, (account) => {
+      console.log(`   Cuenta: ${account.accountNumber}`);
+      console.log(`   Estado: ${account.status}`);
+      console.log(`   Efectivo: $${account.cash.toFixed(2)}`);
+      console.log(`   Poder de compra: $${account.buyingPower.toFixed(2)}`);
+      console.log(`   Patrimonio neto: $${account.equity.toFixed(2)}\n`);
+    })
+  );
 
-    // Verificar Redis
-    console.log('═══════════════════════════════════════');
-    console.log('🧠 VERIFICACIÓN 3: Redis');
-    console.log('═══════════════════════════════════════\n');
-    const redisClient = createRedisClient(redisConfig);
-    const redisResult = await verifyRedis(redisClient);
-    console.log(`   Redis OK: ${JSON.stringify(redisResult)}`);
-    console.log('');
+  results.push(
+    await runCheck('VERIFICACIÓN 2: PostgreSQL', '🗄️', async () => {
+      const pool = createPostgresPool(postgresConfig);
+      try {
+        return await verifyPostgres(pool);
+      } finally {
+        await pool.end();
+      }
+    }, (result) => {
+      console.log(`   PostgreSQL OK: ${JSON.stringify(result)}\n`);
+    })
+  );
 
-    // Verificar MinIO
-    console.log('═══════════════════════════════════════');
-    console.log('📦 VERIFICACIÓN 4: MinIO');
-    console.log('═══════════════════════════════════════\n');
-    const minioClient = createMinioClient(minioConfig);
-    const minioResult = await verifyStorage(minioClient, minioConfig);
-    console.log(`   MinIO OK: ${minioResult}`);
-    console.log('');
+  results.push(
+    await runCheck('VERIFICACIÓN 3: Redis', '🧠', async () => {
+      const client = createRedisClient(redisConfig);
+      return verifyRedis(client);
+    }, (result) => {
+      console.log(`   Redis OK: ${JSON.stringify(result)}\n`);
+    })
+  );
 
-    console.log('═══════════════════════════════════════');
-    console.log('✅ DIAGNÓSTICO COMPLETO');
-    console.log('═══════════════════════════════════════\n');
-    console.log('El entorno nativo PostgreSQL / Redis / MinIO está listo.');
-  } catch (error) {
-    if (error instanceof Error) {
-      console.error('❌ Error de verificación:', error.message);
-    } else {
-      console.error('❌ Error desconocido:', error);
-    }
-    process.exit(1);
+  results.push(
+    await runCheck('VERIFICACIÓN 4: MinIO', '📦', async () => {
+      const client = createMinioClient(minioConfig);
+      return verifyStorage(client, minioConfig);
+    }, (result) => {
+      console.log(`   MinIO OK: ${result}\n`);
+    })
+  );
+
+  const allOk = results.every((r) => r.ok);
+
+  console.log('═══════════════════════════════════════');
+  console.log(allOk ? '✅ DIAGNÓSTICO COMPLETO' : '⚠️  DIAGNÓSTICO CON ERRORES');
+  console.log('═══════════════════════════════════════\n');
+  results.forEach((r) => console.log(`   ${r.ok ? '✅' : '❌'} ${r.name}`));
+
+  if (!allOk) {
+    process.exitCode = 1;
   }
 }
 
-verifyServices();
+main();

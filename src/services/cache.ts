@@ -6,8 +6,11 @@ export function createRedisClient(config: RedisConfig) {
 }
 
 export async function verifyRedis(client: ReturnType<typeof createRedisClient>) {
-  await client.set('vibe-bots:health-check', JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
-  const value = await client.get('vibe-bots:health-check');
-  await client.quit();
-  return value ? JSON.parse(value) : null;
+  try {
+    await client.set('vibe-bots:health-check', JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
+    const value = await client.get('vibe-bots:health-check');
+    return value ? JSON.parse(value) : null;
+  } finally {
+    await client.quit();
+  }
 }

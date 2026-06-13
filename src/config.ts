@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
-import axios from 'axios';
 
 export interface AlpacaConfig {
   apiKey: string;
@@ -87,16 +86,4 @@ export function loadMinioConfig(): MinioConfig {
   }
 
   return { endpoint, accessKey, secretKey, bucket, region };
-}
-
-export function createAlpacaClient() {
-  const config = loadAlpacaConfig();
-
-  return axios.create({
-    baseURL: config.baseUrl,
-    headers: {
-      'APCA-API-KEY-ID': config.apiKey,
-      'APCA-API-SECRET-KEY': config.apiSecret,
-    },
-  });
 }
