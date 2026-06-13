@@ -1,44 +1,68 @@
 # Vibe Bots
 
-Proyecto inicial para programar bots usando GitHub Copilot o Anthropic Claude en una instancia LXD.
+Proyecto de bot trader en TypeScript diseñado para correr en una instancia LXD con servicios nativos.
 
-## Objetivo
-
-Crear y mantener bots con un flujo de desarrollo asistido por IA, usando archivos de personalización para Copilot y Claude.
-
-## Estructura
+## Arquitectura actual
 
 - `src/` - código fuente TypeScript
-- `package.json` - scripts de desarrollo
-- `tsconfig.json` - configuración de TypeScript
-- `AGENTS.md` - instrucciones de contexto para agentes IA
+- `package.json` - dependencias y scripts
+- `tsconfig.json` - configuración TypeScript
+- `AGENTS.md` - contexto y reglas para agentes IA
 - `secure/` - directorio ignorado para claves y secretos locales
-- `.env.example` - ejemplo de variables de entorno
+- `.env.example` - plantilla de variables de entorno
+
+## Stack nativo
+
+El proyecto está configurado para usar servicios nativos instalados en la misma instancia:
+
+- PostgreSQL para almacenamiento relacional y datos históricos
+- Redis para caché, colas o estado en memoria
+- MinIO para almacenamiento S3 compatible de datos brutos y backups
+- Alpaca API para trading y cotizaciones
+
+> No se usa Docker en el entorno actual. Los archivos `Dockerfile`, `docker-compose.yml` y `docker/` ya no forman parte de la arquitectura activa.
 
 ## Comandos
 
-- `npm install` - instalar dependencias
+- `npm install` - instalar dependencias Node
 - `npm run build` - compilar TypeScript
 - `npm start` - ejecutar el bot compilado
 - `npm run dev` - ejecutar con `ts-node`
 
-## Notas
+## Configuración local
 
-1. Instala Node.js y npm en la instancia LXD si aún no están presentes.
-2. Instala `GitHub Copilot` y/o `Anthropic Claude` en VS Code.
-3. Guarda credenciales en `secure/keys.env` o en variables de entorno locales, nunca en el repositorio.
-4. Usa `.env.example` como plantilla para tus claves privadas.
+1. Crea `secure/keys.env` con las variables necesarias.
+2. Si no usas `secure/keys.env`, pon las mismas variables en un `.env` local.
+3. El proyecto cargará automáticamente estas variables.
 
-## Configuración segura de Alpaca
-
-1. Crea el archivo `secure/keys.env` con las siguientes variables:
+## Variables requeridas
 
 ```env
 ALPACA_API_KEY=tu_api_key_aqui
 ALPACA_API_SECRET=tu_api_secret_aqui
 ALPACA_BASE_URL=https://paper-api.alpaca.markets
+
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=vibe
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+
+REDIS_URL=redis://localhost:6379
+
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=vibe-bots
+MINIO_REGION=us-east-1
 ```
 
-2. Ese archivo se ignorará en Git gracias a `.gitignore`.
-3. La aplicación carga `secure/keys.env` automáticamente si existe.
-4. No compartas las claves reales en mensajes o commits.
+## Arquitectura para futuros agentes de código
+
+Este proyecto ya está preparado para evolucionar hacia:
+
+1. ingestión de datos en PostgreSQL
+2. uso de Redis para estado y colas
+3. almacenamiento de archivos y snapshots en MinIO
+4. ejecución de órdenes vía Alpaca
+5. agregación de backtesting, dashboards y servicios de IA
