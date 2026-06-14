@@ -1,0 +1,164 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 0 1rem 2rem;
+  background: #0f1115;
+  color: #e6e6e6;
+}
+
+header {
+  padding: 1.5rem 0 0.5rem;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.8rem;
+}
+
+.subtitle {
+  margin: 0.25rem 0 0;
+  color: #9aa0a6;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.card {
+  background: #1a1d23;
+  border: 1px solid #2a2e35;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.section-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+button {
+  background: #2f6fed;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #4a82f0;
+}
+
+button:disabled {
+  background: #3a3f47;
+  cursor: not-allowed;
+}
+
+.muted {
+  color: #9aa0a6;
+  font-size: 0.85rem;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+
+.health-card {
+  border-radius: 8px;
+  padding: 0.75rem;
+  border: 1px solid #2a2e35;
+  background: #14171c;
+}
+
+.health-card.ok {
+  border-left: 4px solid #2ecc71;
+}
+
+.health-card.error {
+  border-left: 4px solid #e74c3c;
+}
+
+.health-card h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.health-card .status {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.health-card.ok .status {
+  color: #2ecc71;
+}
+
+.health-card.error .status {
+  color: #e74c3c;
+}
+
+.health-card ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+  color: #c7c9cc;
+}
+
+.health-card .error-message {
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  color: #ff8b7e;
+  word-break: break-word;
+}
+
+.result {
+  background: #0f1115;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-size: 0.85rem;
+  color: #c7c9cc;
+  min-height: 1.5rem;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+#grafana-container iframe {
+  width: 100%;
+  height: 900px;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  background: white;
+}
+
+footer {
+  text-align: center;
+  margin-top: 1.5rem;
+}

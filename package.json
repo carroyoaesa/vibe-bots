@@ -7,16 +7,19 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "ingest": "ts-node src/ingest.ts"
+    "ingest": "ts-node src/ingest.ts",
+    "web": "ts-node src/server.ts"
   },
   "dependencies": {
     "axios": "^1.17.0",
     "dotenv": "^16.4.0",
+    "express": "^5.2.1",
     "ioredis": "^5.3.1",
     "minio": "^7.0.25",
     "pg": "^8.11.2"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/pg": "^8.6.0",
     "ts-node": "^10.9.1",
     "typescript": "^5.5.0"

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibe Bots - Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>🤖 Vibe Bots</h1>
+    <p class="subtitle">Panel de control - Fase 1.5</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="section-header">
+        <h2>Estado de servicios</h2>
+        <div class="section-actions">
+          <span id="health-updated" class="muted"></span>
+          <button id="refresh-health">🔄 Actualizar</button>
+        </div>
+      </div>
+      <div id="health-grid" class="health-grid">
+        <p class="muted">Cargando estado de servicios...</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <h2>Ingesta de datos</h2>
+        <button id="run-ingest">📥 Ejecutar ingesta</button>
+      </div>
+      <p class="muted">
+        Descarga bars, noticias, fundamentales y series macro del watchlist, y cachea quotes en Redis.
+      </p>
+      <pre id="ingest-result" class="result"></pre>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <h2>Grafana</h2>
+      </div>
+      <div id="grafana-container">
+        <p class="muted">Cargando dashboard de Grafana...</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p class="muted">Vibe Bots · Fase 1.5 · Dashboard web</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

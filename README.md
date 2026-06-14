@@ -24,6 +24,7 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - Alpha Vantage para quotes y series alternativas (uso moderado, free tier limitado)
 - FRED (Federal Reserve Economic Data) para series macroeconómicas
 - Grafana para dashboards, leyendo directamente de PostgreSQL
+- Express para el dashboard web (health checks, ingesta manual y panel de Grafana embebido)
 
 > No se usa Docker en el entorno actual. Los archivos `Dockerfile`, `docker-compose.yml` y `docker/` ya no forman parte de la arquitectura activa.
 
@@ -34,6 +35,7 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - `npm start` - ejecutar el bot compilado
 - `npm run dev` - ejecutar diagnóstico completo con `ts-node`
 - `npm run ingest` - ejecutar la ingesta de datos de mercado (Fase 1)
+- `npm run web` - levantar el dashboard web (Fase 1.5) en `http://0.0.0.0:4000`
 
 ## Configuración local
 
@@ -67,6 +69,10 @@ FMP_API_KEY=
 FINNHUB_API_KEY=
 ALPHA_VANTAGE_API_KEY=
 FRED_API_KEY=
+
+# Dashboard web (Fase 1.5)
+WEB_PORT=4000
+GRAFANA_PUBLIC_URL=
 ```
 
 ## Diagnóstico (`npm run dev`)
@@ -96,13 +102,32 @@ Además cachea en Redis el último quote de Finnhub por símbolo (`quote:<SYMBOL
 
 > ⚠️ Alpha Vantage tiene un free tier muy limitado (~25 requests/día). Su cliente (`src/services/alphaVantage.ts`) está disponible y se prueba en el diagnóstico, pero **no** se usa en la ingesta recurrente para no agotar la cuota.
 
+## Dashboard web (`npm run web`) - Fase 1.5
+
+`src/server.ts` levanta un servidor Express (puerto `WEB_PORT`, por defecto `4000`) que sirve un frontend estático (`public/`) y una API mínima:
+
+- `GET /` - dashboard web (health checks, botón de ingesta y panel de Grafana embebido).
+- `GET /api/health` - ejecuta las 9 verificaciones de `src/diagnostics.ts` (las mismas que `npm run dev`) y devuelve JSON con el estado de cada servicio.
+- `GET /api/config` - expone configuración pública para el frontend (por ahora, `grafanaPublicUrl`).
+- `POST /api/ingest` - ejecuta `src/ingestRunner.ts` (misma lógica que `npm run ingest`) y devuelve un resumen JSON.
+
+El frontend (`public/index.html`, `public/app.js`, `public/styles.css`):
+
+- Muestra una tarjeta por servicio con su estado (✅/❌) y detalle, refrescando cada 60s.
+- Permite disparar la ingesta manualmente y ver el resultado.
+- Embebe el dashboard "Vibe Bots - Overview" de Grafana vía `<iframe>`, usando la URL de `GRAFANA_PUBLIC_URL`.
+
+`src/diagnostics.ts` y `src/ingestRunner.ts` son los módulos compartidos: `src/index.ts` (CLI) y `src/ingest.ts` (CLI) son ahora wrappers delgados sobre ellos, para que la CLI y el dashboard web ejecuten exactamente la misma lógica.
+
 ## Grafana
 
 Grafana corre como servicio nativo (`systemctl status grafana-server`) en `http://localhost:3000`.
 
 - Datasource "PostgreSQL - vibe" provisionado en `/etc/grafana/provisioning/datasources/vibe-postgres.yaml`, apuntando a la misma base `vibe` y usuario (`vibe_bot`) que usa el bot.
 - Login inicial: `admin` / `admin` (Grafana pide cambiarla en el primer ingreso).
-- Aún sin dashboards: ahora que `npm run ingest` ya escribe en `market_bars`, `news_items`, `fundamentals_snapshots` y `macro_series`, se pueden crear paneles sobre esas tablas.
+- Dashboard "Vibe Bots - Overview" (`grafana/dashboards/vibe-overview.json`, uid `vibe-bots-overview`): precio de cierre del watchlist (30 días), noticias recientes, indicadores macro (FRED) y fundamentales (FMP). Se crea/actualiza vía API (`POST /api/dashboards/db` con `admin:admin`).
+- **Embedding**: `/etc/grafana/grafana.ini` tiene `[security] allow_embedding = true` (cambio manual a nivel de sistema, fuera de este repo). `auth.anonymous` permanece deshabilitado.
+- **Acceso público acotado**: el dashboard "Vibe Bots - Overview" está compartido como [Public Dashboard](https://grafana.com/docs/grafana/latest/dashboards/sharing-dashboards-panels/shared-dashboards/) (`POST /api/dashboards/uid/<uid>/public-dashboards`), por lo que es accesible sin login solo a través de su URL pública (`GRAFANA_PUBLIC_URL`). El resto de Grafana (admin, otros dashboards) sigue requiriendo autenticación.
 
 ## Arquitectura para futuros agentes de código
 
@@ -110,6 +135,7 @@ Estado de las fases:
 
 1. ✅ **Ingestión de datos en PostgreSQL** (Fase 1, `src/ingest.ts`): bars, noticias, fundamentales y series macro.
 2. ✅ uso de Redis para caché de quotes (Finnhub) - pendiente extender a estado/colas de órdenes.
-3. ⬜ almacenamiento de archivos y snapshots en MinIO (aún solo health-check).
-4. ⬜ ejecución de órdenes vía Alpaca (señales + gestión de riesgo + bracket orders).
-5. ⬜ backtesting y capa de IA (Claude) combinando indicadores técnicos + fundamentales (FMP) + sentimiento (noticias/Alpha Vantage) + contexto macro (FRED), visualizado en Grafana.
+3. ✅ **Dashboard web** (Fase 1.5, `src/server.ts` + `public/`): health checks, ingesta manual y panel de Grafana embebido (Public Dashboard).
+4. ⬜ almacenamiento de archivos y snapshots en MinIO (aún solo health-check).
+5. ⬜ ejecución de órdenes vía Alpaca (señales + gestión de riesgo + bracket orders).
+6. ⬜ backtesting y capa de IA (Claude) combinando indicadores técnicos + fundamentales (FMP) + sentimiento (noticias/Alpha Vantage) + contexto macro (FRED), visualizado en Grafana.

@@ -1,0 +1,81 @@
+{
+  "title": "Vibe Bots - Overview",
+  "uid": "vibe-bots-overview",
+  "tags": ["vibe-bots"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Precio de cierre - watchlist (30 dias)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, close AS value, symbol AS metric FROM market_bars WHERE timeframe = '1Day' ORDER BY ts",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Noticias recientes",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "table",
+          "rawSql": "SELECT published_at AS \"time\", headline, source, array_to_string(symbols, ', ') AS symbols FROM news_items ORDER BY published_at DESC LIMIT 20",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Indicadores macro (FRED, ultimo valor)",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 9 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "table",
+          "rawSql": "SELECT series_id, obs_date, value FROM macro_series ms WHERE obs_date = (SELECT MAX(obs_date) FROM macro_series WHERE series_id = ms.series_id) ORDER BY series_id",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Fundamentales (FMP, ultimo snapshot)",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 9 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "fieldConfig": { "defaults": {}, "overrides": [
+        { "matcher": { "id": "byName", "options": "market_cap" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] },
+        { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] }
+      ] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (symbol) symbol, data->>'companyName' AS company, data->>'sector' AS sector, (data->>'marketCap')::numeric AS market_cap, (data->>'price')::numeric AS price FROM fundamentals_snapshots ORDER BY symbol, fetched_at DESC",
+          "rawQuery": true
+        }
+      ]
+    }
+  ]
+}

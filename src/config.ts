@@ -44,6 +44,11 @@ export interface FredConfig {
   apiKey: string;
 }
 
+export interface WebConfig {
+  port: number;
+  grafanaPublicUrl?: string;
+}
+
 const secureEnvPath = path.resolve(process.cwd(), 'secure', 'keys.env');
 
 if (fs.existsSync(secureEnvPath)) {
@@ -142,4 +147,11 @@ export function loadFredConfig(): FredConfig {
   }
 
   return { apiKey };
+}
+
+export function loadWebConfig(): WebConfig {
+  const port = Number(process.env.WEB_PORT || '4000');
+  const grafanaPublicUrl = process.env.GRAFANA_PUBLIC_URL || undefined;
+
+  return { port, grafanaPublicUrl };
 }
