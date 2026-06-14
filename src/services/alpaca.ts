@@ -110,6 +110,25 @@ export async function placeBracketBuyOrder(client: AxiosInstance, req: BracketBu
   return data;
 }
 
+export interface AlpacaMarketClock {
+  isOpen: boolean;
+  nextOpen: string;
+  nextClose: string;
+  timestamp: string;
+}
+
+/** Estado del mercado (abierto/cerrado) y próxima apertura/cierre, según el calendario de Alpaca. */
+export async function getMarketClock(client: AxiosInstance): Promise<AlpacaMarketClock> {
+  const { data } = await client.get('/v2/clock');
+
+  return {
+    isOpen: data.is_open,
+    nextOpen: data.next_open,
+    nextClose: data.next_close,
+    timestamp: data.timestamp,
+  };
+}
+
 export async function cancelOrder(client: AxiosInstance, orderId: string): Promise<void> {
   await client.delete(`/v2/orders/${orderId}`);
 }

@@ -11,7 +11,7 @@ Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución pape
 ## Reglas operativas críticas (NO romper sin pedir confirmación explícita)
 
 1. **`src/server.ts` (dashboard web) NUNCA va como servicio systemd.** Se gestiona solo con `./scripts/start-web.sh`, `./scripts/stop-web.sh`, `./scripts/status.sh` (nohup + PID en `run/web.pid`, logs en `logs/web.log`). Decisión deliberada del usuario, repetida más de una vez.
-2. **`runTradingCycle()` (`npm run trade`, `POST /api/trading/run`, botón "Ejecutar ciclo de trading") coloca/cierra órdenes REALES en la cuenta PAPER de Alpaca.** No hay modo dry-run separado. Cualquier cambio a `tradingRunner.ts`, `strategy/config.ts` o `strategy/signals.ts` es un cambio de comportamiento de trading real (en paper). No ejecutar este ciclo proactivamente sin que el usuario lo pida.
+2. **`runTradingCycle()` (`npm run trade`, `POST /api/trading/run`, botón "Ejecutar ciclo de trading") coloca/cierra órdenes REALES en la cuenta PAPER de Alpaca.** No hay modo dry-run separado. Cualquier cambio a `tradingRunner.ts`, `strategy/config.ts` o `strategy/signals.ts` es un cambio de comportamiento de trading real (en paper). **Desde 2026-06-14 corre automáticamente vía cron** (`npm run trade:cron`, ver "Automatización (cron)" más abajo) cada hora durante el horario de mercado - no es necesario ejecutarlo manualmente salvo pedido explícito.
 3. **Push a `main` en GitHub requiere confirmación explícita del usuario en cada ocasión** (no asumir autorización previa).
 4. **No instalar paquetes apt a nivel de sistema** (p.ej. `playwright install-deps`) sin pedido explícito - se considera modificación significativa de infraestructura compartida.
 5. Secretos en `secure/keys.env` (o `.env` local), nunca en el repo. Credenciales de Git van vía `~/.git-credentials` (credential helper), no en `secure/keys.env` ni en la URL del remoto.
@@ -65,9 +65,19 @@ Recalcula señales **frescas** (no cacheadas) para los 20 símbolos vía `getClo
 
 ## Comandos
 
-`npm run build` (tsc) · `npm run dev` (diagnóstico) · `npm run ingest` · `npm run trade` · `npm run web:start` / `web:stop` / `status` (dashboard, scripts/, NUNCA systemd).
+`npm run build` (tsc) · `npm run dev` (diagnóstico) · `npm run ingest` · `npm run trade` · `npm run trade:cron` (wrapper cron-safe, ver abajo) · `npm run web:start` / `web:stop` / `status` (dashboard, scripts/, NUNCA systemd).
+
+## Automatización (cron, desde 2026-06-14)
+
+- `src/cronTrade.ts` (`npm run trade:cron`) llama a `getMarketClock` (`GET /v2/clock` de Alpaca, `src/services/alpaca.ts`) y solo ejecuta `runTradingCycle()` si `isOpen`; si el mercado está cerrado, loguea `nextOpen` y sale 0 (no-op, seguro para cron).
+- **Crontab de `root`** (fuera del repo, no versionado - revisar con `crontab -l` tras una auto-compactación):
+  - Ciclo de trading: `0 13-21 * * 1-5 cd /root/bots/vibe-bots && /usr/bin/npm run trade:cron >> logs/trade-cron.log 2>&1` (cada hora en punto, 13-21 UTC = cubre 9:30-16:00 ET en EST y EDT; `/v2/clock` filtra fuera de sesión/feriados/fines de semana).
+  - Ingesta diaria: `0 22 * * 1-5 cd /root/bots/vibe-bots && /usr/bin/npm run ingest >> logs/ingest-cron.log 2>&1` (22:00 UTC, después del cierre en EST y EDT).
+- Cadencia horaria es deliberada: la estrategia opera sobre cierres **diarios** (`market_bars`, refrescados 1x/día por la ingesta), así que las señales no cambian intra-día; las corridas horarias re-sincronizan posiciones/órdenes y re-evalúan SELL con equity actualizado. Para más frecuencia, cambiar `0 13-21` por `*/30 13-21` en el crontab.
+- Logs en `logs/trade-cron.log` / `logs/ingest-cron.log` (gitignored).
 
 ## Pendientes conocidos / diferidos
 
 - Grafana: paneles `timeseries` con `fieldConfig.defaults.custom` (v2, ambos dashboards) siguen sin mostrar datos visualmente en el iframe embebido. El usuario lo marcó como "para un punto futuro" - no es bloqueante.
 - Orden de compra LÍMITE puede no ejecutarse si el precio nunca toca `estimatedEntryPrice` en la sesión (`time_in_force: 'day'`).
+- Fase 4 (backtesting + capa de IA con Claude): pendiente, requiere `ANTHROPIC_API_KEY` en `secure/keys.env` (no presente aún).

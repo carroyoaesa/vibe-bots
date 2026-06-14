@@ -41,6 +41,7 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - `npm run dev` - ejecutar diagnóstico completo con `ts-node`
 - `npm run ingest` - ejecutar la ingesta de datos de mercado (Fase 1)
 - `npm run trade` - ejecutar un ciclo de trading (Fase 2, paper): calcula señales, aplica el perfil de riesgo y coloca/cierra bracket orders en Alpaca paper
+- `npm run trade:cron` - como `npm run trade`, pero primero consulta `/v2/clock` de Alpaca y no hace nada si el mercado está cerrado. Pensado para cron (ver "Automatización" más abajo).
 - `npm run web` - levantar el dashboard web (Fase 1.5+) en primer plano, en `http://0.0.0.0:4000`
 - `npm run web:start` / `npm run web:stop` - levantar/detener el dashboard web en background (ver `scripts/`)
 - `npm run status` - ver el estado de los servicios nativos (Postgres/Redis/MinIO/Grafana) y del dashboard web
@@ -138,13 +139,22 @@ Además cachea en Redis el último quote de Finnhub por símbolo (`quote:<SYMBOL
 
 Para cada símbolo del watchlist: lee los últimos cierres (`getCloses`), calcula la señal y la persiste en `trading_signals`, y según la señal:
 
-- **BUY**: si no hay posición ni orden pendiente para el símbolo y no se alcanzó el máximo de posiciones, calcula la cantidad (`equity * 10% / precio actual`, mínimo 1 acción) y coloca una **bracket order de compra LÍMITE** (`type: 'limit'`) al `estimatedEntryPrice`, con `take_profit.limit_price = estimatedExitPrice` y `stop_loss.stop_price = estimatedEntryPrice * (1 - stopLossPct)`. Si `estimatedEntryPrice` no está disponible, usa el precio de mercado actual como respaldo.
+- **BUY**: si no hay posición ni orden pendiente para el símbolo y no se alcanzó el máximo de posiciones, calcula la cantidad (`equity * 10% / precio actual`, mínimo 1 acción) y coloca una **bracket order de compra LÍMITE** (`type: 'limit'`) a `min(estimatedEntryPrice, precio actual)` (si el precio actual ya está por debajo del estimado, se usa el actual para no pagar de más), con `take_profit`/`stop_loss` calculados sobre ese mismo precio (`+6%` / `-3%`). Si `estimatedEntryPrice` no está disponible, usa el precio de mercado actual.
 - **SELL**: si hay una posición abierta, cancela órdenes pendientes del símbolo y cierra la posición a mercado.
 - **HOLD**: sin acción.
 
 Cada orden ejecutada (o error) se registra en `trading_orders`, vinculada a la señal que la originó. La respuesta cruda de Alpaca (incluyendo el `limit_price` real enviado) queda en la columna `raw` (JSONB).
 
-> ⚠️ Como la orden de compra es ahora una orden **límite** (no a mercado), puede quedar pendiente sin ejecutarse si el precio de mercado nunca llega al `estimatedEntryPrice` durante la sesión (`time_in_force: 'day'`).
+> ⚠️ Como la orden de compra es ahora una orden **límite** (no a mercado), puede quedar pendiente sin ejecutarse si el precio de mercado nunca llega al precio de entrada calculado durante la sesión (`time_in_force: 'day'`).
+
+### Automatización (cron)
+
+`src/cronTrade.ts` (`npm run trade:cron`) consulta `GET /v2/clock` (`getMarketClock` en `src/services/alpaca.ts`) y solo llama a `runTradingCycle()` si el mercado está abierto; si está cerrado, loguea la próxima apertura y termina sin hacer nada (exit 0). El crontab de `root` (fuera del repo) tiene:
+
+- **Ciclo de trading**: cada hora en punto, 13:00-21:00 UTC, lunes a viernes (`0 13-21 * * 1-5`). Esa ventana cubre el horario de mercado de EE.UU. (9:30-16:00 ET) tanto en EST como en EDT con margen; el chequeo de `/v2/clock` filtra las horas fuera de sesión, fines de semana y feriados. Salida en `logs/trade-cron.log`.
+- **Ingesta diaria**: 22:00 UTC, lunes a viernes (`0 22 * * 1-5`), siempre después del cierre (16:00 ET) tanto en EST como en EDT. Salida en `logs/ingest-cron.log`.
+
+La cadencia horaria es deliberadamente conservadora: la estrategia opera sobre cierres **diarios** (`market_bars`), por lo que las señales no cambian entre una ingesta y la siguiente dentro del mismo día - las corridas intradía sirven principalmente para re-sincronizar posiciones/órdenes (p.ej. si una bracket order límite de la mañana recién se ejecutó) y re-evaluar señales SELL con el equity actualizado. Para reaccionar más rápido, cambiar `0 13-21` por `*/30 13-21` (cada 30 min) en el crontab.
 
 ### Exposición vía API/web
 

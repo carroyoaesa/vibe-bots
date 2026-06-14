@@ -9,7 +9,7 @@ Este proyecto contiene un bot inicial construido en TypeScript.
 - Proyecto de bot para uso con GitHub Copilot y Anthropic Claude.
 - Stack: Node.js + TypeScript.
 - El código principal está en `src/index.ts`.
-- Usa `npm install`, `npm run build`, `npm start`, `npm run dev`, `npm run ingest`, `npm run trade`, `npm run web`.
+- Usa `npm install`, `npm run build`, `npm start`, `npm run dev`, `npm run ingest`, `npm run trade`, `npm run trade:cron`, `npm run web`.
 
 ## Convenciones
 
@@ -59,6 +59,14 @@ Cada cliente tiene una función `verifyX()` que se ejecuta en `npm run dev` (`sr
 - `src/tradingRunner.ts`: `runTradingCycle()` - orquesta señales + riesgo + ejecución para todo el watchlist. Es la lógica compartida entre `src/trade.ts` (CLI, `npm run trade`) y `POST /api/trading/run`. En BUY, coloca la bracket order límite al `estimatedEntryPrice` (con fallback a `signal.price` si es `null`), con TP/SL relativos a ese precio.
 - ⚠️ **`runTradingCycle()` coloca/cierra órdenes reales (bracket orders) en la cuenta PAPER de Alpaca.** No hay un modo "dry-run" separado en esta fase - el entorno paper de Alpaca ya cumple ese rol. Cualquier cambio a `tradingRunner.ts`, `strategy/config.ts` (perfil de riesgo) o `strategy/signals.ts` debe tenerse en cuenta como un cambio de comportamiento de trading real (en paper).
 - `grafana/dashboards/vibe-trading.json` (uid `vibe-bots-trading`): historial de señales, precio/RSI por símbolo y órdenes recientes. Se publica igual que `vibe-overview.json` (`POST /api/dashboards/db` con `admin:admin`). Los paneles `timeseries` tienen `fieldConfig.defaults.custom` (v2) pero la verificación visual queda pendiente (diferido a pedido del usuario).
+
+### Automatización (cron, desde 2026-06-14)
+
+- `src/cronTrade.ts` (`npm run trade:cron`): wrapper cron-safe sobre `runTradingCycle()`. Llama a `getMarketClock` (`GET /v2/clock` en `src/services/alpaca.ts`) y solo ejecuta el ciclo si `isOpen === true`; si el mercado está cerrado, loguea `nextOpen` y sale con código 0 sin hacer nada.
+- Crontab de `root` (fuera del repo, **no versionado** - revisar con `crontab -l`):
+  - `0 13-21 * * 1-5 cd /root/bots/vibe-bots && /usr/bin/npm run trade:cron >> logs/trade-cron.log 2>&1` - ciclo de trading cada hora en punto, ventana UTC amplia (13-21) que cubre 9:30-16:00 ET en EST y EDT; `getMarketClock` filtra fuera de sesión/feriados/fines de semana.
+  - `0 22 * * 1-5 cd /root/bots/vibe-bots && /usr/bin/npm run ingest >> logs/ingest-cron.log 2>&1` - ingesta diaria post-cierre.
+- La cadencia horaria es deliberada: la estrategia opera sobre cierres diarios (`market_bars`), por lo que las señales no cambian intra-día; las corridas horarias re-sincronizan posiciones/órdenes y re-evalúan SELL. Logs en `logs/trade-cron.log` / `logs/ingest-cron.log` (gitignored).
 
 ## Snapshots en MinIO (Fase 3)
 
