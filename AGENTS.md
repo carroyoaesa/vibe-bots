@@ -48,7 +48,7 @@ Cada cliente tiene una función `verifyX()` que se ejecuta en `npm run dev` (`sr
 
 ## Trading automatizado (Fase 2, paper)
 
-- `src/watchlist.ts`: fuente única de verdad para `WATCHLIST` (22 símbolos: 13 ETFs en `ETF_SYMBOLS` + 9 acciones), `MACRO_SERIES` y `BARS_LOOKBACK_DAYS` (220 días, para tener suficiente histórico para SMA30+RSI14). Usado por `src/ingestRunner.ts`, la estrategia y `/api/trading/status` (clasifica cada símbolo como `ETF`/`STOCK`).
+- `src/watchlist.ts`: fuente única de verdad para `WATCHLIST` (20 símbolos: 11 ETFs en `ETF_SYMBOLS` + 9 acciones), `MACRO_SERIES` y `BARS_LOOKBACK_DAYS` (220 días, para tener suficiente histórico para SMA30+RSI14). Usado por `src/ingestRunner.ts`, la estrategia y `/api/trading/status` (clasifica cada símbolo como `ETF`/`STOCK`).
 - `src/strategy/`: lógica pura (sin I/O) de la estrategia.
   - `indicators.ts`: `sma()`, `rsi()`, `momentum()`, `smaSeries()`, `rsiSeries()`, `estimateEntryPrice()`.
   - `signals.ts`: `computeSignal(symbol, closes)` -> `SignalResult` con `BUY`/`SELL`/`HOLD` (cruce SMA10/SMA30 confirmado con RSI<70 y momentum>0 para BUY), más `estimatedEntryPrice` y `estimatedExitPrice` (= `estimatedEntryPrice * (1 + RISK_PROFILE.takeProfitPct)`).

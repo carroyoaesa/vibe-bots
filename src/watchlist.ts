@@ -1,13 +1,13 @@
 export const WATCHLIST = [
-  'AAPL', 'MSFT', 'SPY', 'QQQ', 'NVDA',
+  'AAPL', 'MSFT', 'SPY', 'NVDA',
   'REG', 'TOL', 'SCHE', 'SCHF', 'AMZN', 'XLP', 'XLU', 'XMMO', 'VUG',
-  'SCHG', 'TSM', 'GOOGL', 'SCHD', 'MS', 'SPMO', 'QQQM', 'SOXQ',
+  'TSM', 'GOOGL', 'SCHD', 'MS', 'SPMO', 'QQQM', 'SOXQ',
 ];
 
 // Subconjunto de WATCHLIST que son ETFs (el resto se considera "acciones" en el front end).
 export const ETF_SYMBOLS = [
-  'SPY', 'QQQ', 'SCHE', 'SCHF', 'XLP', 'XLU', 'XMMO', 'VUG',
-  'SCHG', 'SCHD', 'SPMO', 'QQQM', 'SOXQ',
+  'SPY', 'SCHE', 'SCHF', 'XLP', 'XLU', 'XMMO', 'VUG',
+  'SCHD', 'SPMO', 'QQQM', 'SOXQ',
 ];
 
 export const MACRO_SERIES = ['FEDFUNDS', 'CPIAUCSL', 'UNRATE'];
