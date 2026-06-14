@@ -2,7 +2,7 @@
 
 Proyecto de bot trader en TypeScript diseñado para correr en una instancia LXD con servicios nativos.
 
-Estado actual: bot operativo de punta a punta - ingesta diaria de datos de mercado, generación de señales técnicas con un perfil de riesgo configurable (`bot_settings`), evaluación y ajuste de esas señales por Claude (Anthropic), ejecución automática de bracket orders en la cuenta paper de Alpaca, backtesting de la estrategia, snapshots en MinIO y un dashboard web (+ Grafana) para monitoreo y configuración. Ver "Flujo del bot" justo abajo para el recorrido completo, y "Próximas fases (mejoras propuestas)" al final para ideas de evolución.
+Estado actual: bot operativo de punta a punta - ingesta diaria de datos de mercado, generación de señales técnicas con un perfil de riesgo configurable (`bot_settings`), evaluación y ajuste de esas señales por Claude (Anthropic), ejecución automática de bracket orders en la cuenta paper de Alpaca (con un interruptor ON/OFF para bloquear órdenes desde el dashboard), backtesting de la estrategia, snapshots en MinIO y un dashboard web para monitoreo y configuración (Grafana corre por separado, ver sección "Grafana"). Ver "Flujo del bot" justo abajo para el recorrido completo, y "Próximas fases (mejoras propuestas)" al final para ideas de evolución.
 
 ## Flujo del bot (de los datos a una orden en Alpaca)
 
@@ -14,7 +14,7 @@ Cada ciclo de trading (`npm run trade`, `npm run trade:cron` o `POST /api/tradin
 4. **Evaluación de IA** (`assessWatchlist()` en `src/services/claude.ts`, una sola llamada a Claude por ciclo): para cada señal, Claude recibe el contexto técnico + precios estimados + fundamentales + noticias + macro, y devuelve `recommendation` (`buy`/`hold`/`avoid`), `score`, `confidence`, `rationale` y, opcionalmente, `adjustedEntryPrice`/`adjustedExitPrice`. Si esta llamada falla por cualquier motivo, el ciclo continúa sin ella (fail-open).
 5. **Ajuste de precios** (`applyPriceAdjustment()` en `src/tradingRunner.ts`): si Claude propuso precios ajustados y quedan dentro de ±10% del valor algorítmico (y `exit > entry`), sobrescriben `estimatedEntryPrice`/`estimatedExitPrice` antes de persistir la señal.
 6. **Gate de IA**: una señal `BUY` que ya pasó los chequeos de posición/orden pendiente/máximo de posiciones se bloquea (`AI_BLOCKED`, sin colocar orden) si `recommendation === 'avoid'`. La IA nunca convierte HOLD/SELL en BUY ni toca señales SELL.
-7. **Orden a Alpaca** (cuenta **paper**): si la señal `BUY` sobrevive el gate, se coloca una **bracket order límite** - entrada en `min(estimatedEntryPrice, precio actual)`, con `take_profit`/`stop_loss` calculados según el perfil de riesgo activo. Una señal `SELL` con posición abierta cancela órdenes pendientes y cierra la posición a mercado.
+7. **Orden a Alpaca** (cuenta **paper**): si la señal `BUY` sobrevive el gate, se coloca una **bracket order límite** - entrada en `min(estimatedEntryPrice, precio actual)`, con `take_profit`/`stop_loss` calculados según el perfil de riesgo activo. Una señal `SELL` con posición abierta cancela órdenes pendientes y cierra la posición a mercado. Si el interruptor "Órdenes a Alpaca" del dashboard está en OFF (`bot_settings.trading_enabled = false`), este paso se omite para cualquier señal BUY/SELL (`TRADING_DISABLED`) - los pasos 1-6 (señales, IA, ajuste de precios) siguen corriendo igual.
 8. **Persistencia y exposición**: la señal (`trading_signals`), la orden (`trading_orders`) y la evaluación de IA (`ai_assessments`) quedan en PostgreSQL; un snapshot JSON crudo del ciclo sube a MinIO (best-effort); todo se expone vía `GET /api/trading/status`, `GET /api/assessments` y el dashboard web (`npm run web`).
 
 ## Arquitectura actual
@@ -42,7 +42,7 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - Alpha Vantage para quotes y series alternativas (uso moderado, free tier limitado)
 - FRED (Federal Reserve Economic Data) para series macroeconómicas
 - Grafana para dashboards, leyendo directamente de PostgreSQL
-- Express para el dashboard web (health checks, ingesta manual, panel de trading y panel de Grafana embebido)
+- Express para el dashboard web (health checks, ingesta manual, interruptor ON/OFF de órdenes a Alpaca, configuración y resumen por símbolo con trading, IA y backtesting)
 
 > No se usa Docker en el entorno actual. Los archivos `Dockerfile`, `docker-compose.yml` y `docker/` ya no forman parte de la arquitectura activa.
 
@@ -119,6 +119,14 @@ GRAFANA_PUBLIC_URL=
 9. `src/services/fred.ts` - cliente FRED, verifica última observación de `FEDFUNDS`.
 10. `src/services/claude.ts` - cliente Anthropic (Claude), ping mínimo a `/v1/messages`. ✅ desde que se configuró `ANTHROPIC_API_KEY` en `secure/keys.env` (2026-06-14); si faltara, fallaría (❌) sin afectar el resto del diagnóstico.
 
+## Caché en Redis (`src/services/cache.ts`)
+
+`getCachedJson`/`setCachedJson`/`getCachedOrFetch` guardan JSON + timestamp `cachedAt` con TTL (`EX`), para reducir llamadas repetidas a APIs externas - sobre todo las que dispara el polling de 60s del dashboard web (`/api/health` y `GET /api/trading/status`):
+
+- **Quotes de Finnhub** (`quote:<SYMBOL>`, TTL 5 min): escritas por `npm run ingest` (ver sección "Ingesta de datos").
+- **Chequeos de `runDiagnostics()`** (`/api/health` y `npm run dev`) que llaman a una API externa: `health:market-data`/`health:finnhub` (TTL 5 min), `health:fmp` (10 min), `health:fred` (30 min), `health:anthropic` (10 min), **`health:alpha-vantage` (2 h)**. Si hay valor en caché, NO se llama a la API externa y el resultado trae `cached: true` + `cachedAt`; si falla, no se cachea el error (se reintenta en el próximo poll). Los chequeos locales (postgres, redis, minio) nunca se cachean. El TTL de 2h en Alpha Vantage es clave: su free tier es de 25 requests/día y, sin caché, el polling de 60s del dashboard agotaba la cuota en ~25 minutos.
+- **Estado de Alpaca** (`alpaca:account` TTL 45s, `alpaca:positions` TTL 30s, `alpaca:open-orders` TTL ~70 min): `runTradingCycle()` siempre pide cuenta/posiciones/órdenes abiertas FRESCAS a Alpaca para decidir (la caché nunca se usa para tomar decisiones de trading) y además las guarda en Redis. `GET /api/trading/status` reutiliza `alpaca:account`/`alpaca:positions` (o las pide y cachea si no hay valor) y lee `alpaca:open-orders` solo de caché (sin llamar a Alpaca), exponiendo `openOrdersCount`/`openOrdersAt` (`null` si todavía no corrió ningún ciclo de trading). `alpaca:account` se comparte con el chequeo "alpaca" de `/api/health` (mismo dato).
+
 ## Ingesta de datos (`npm run ingest`)
 
 `src/ingest.ts` corre la ingesta inicial de datos de mercado para el watchlist (`src/watchlist.ts`) y la guarda en PostgreSQL (`src/services/marketStore.ts` crea las tablas si no existen):
@@ -129,7 +137,7 @@ GRAFANA_PUBLIC_URL=
 - **`fundamentals_snapshots`**: perfil/fundamentales por símbolo desde FMP (`JSONB`, un snapshot por corrida).
 - **`macro_series`**: observaciones de FRED para `FEDFUNDS`, `CPIAUCSL`, `UNRATE`.
 
-Además cachea en Redis el último quote de Finnhub por símbolo (`quote:<SYMBOL>`, TTL 5 min) para consumo rápido por el bot.
+Además cachea en Redis el último quote de Finnhub por símbolo (`quote:<SYMBOL>`, TTL 5 min) para consumo rápido por el bot (ver sección "Caché en Redis").
 
 > ⚠️ Alpha Vantage tiene un free tier muy limitado (~25 requests/día). Su cliente (`src/services/alphaVantage.ts`) está disponible y se prueba en el diagnóstico, pero **no** se usa en la ingesta recurrente para no agotar la cuota.
 
@@ -184,7 +192,7 @@ La cadencia horaria es deliberadamente conservadora: la estrategia opera sobre c
 
 - `GET /api/trading/status`: cuenta (equity/cash/buying power), posiciones abiertas, órdenes recientes y **señales recalculadas en el momento** (no cacheadas, usando el perfil de riesgo activo de `bot_settings`) para los 20 símbolos del watchlist, cada una etiquetada como `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`. `estimatedEntryPrice`/`estimatedExitPrice` de cada señal se sobrescriben con el último valor persistido en `trading_signals` (= verificado/ajustado por IA en el ciclo más reciente), si existe.
 - `POST /api/trading/run`: ejecuta `runTradingCycle()` (misma lógica que `npm run trade`) - **coloca/cierra órdenes reales en la cuenta paper**.
-- El frontend (`public/`) tiene una sección "Trading (paper)" con estas tablas, gráficos por símbolo y un botón "Ejecutar ciclo de trading" que pide confirmación antes de llamar a `POST /api/trading/run`.
+- El frontend (`public/`) integra estos datos en la sección "Resumen por símbolo" (gráficos y tablas por símbolo, más posiciones/órdenes al final) con un botón "Ejecutar ciclo de trading" que pide confirmación antes de llamar a `POST /api/trading/run`.
 
 > ⚠️ Tanto `npm run trade` como el botón del dashboard y `POST /api/trading/run` colocan órdenes reales (con dinero simulado) en la cuenta **paper** de Alpaca. No hay modo "solo simulación" adicional en esta fase: el "paper" de Alpaca ya es el entorno de prueba.
 
@@ -240,8 +248,9 @@ Perfil de riesgo, modelo de Claude y el límite de ajuste de precios de IA se le
 
 `src/services/settingsStore.ts`:
 
-- `setupSettingsSchema(pool)`: crea `bot_settings (id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1), risk_preset TEXT, position_size_pct NUMERIC, stop_loss_pct NUMERIC, take_profit_pct NUMERIC, max_positions INTEGER, claude_model TEXT, updated_at TIMESTAMPTZ)` si no existe, y siembra la única fila (`id = 1`) con el perfil "moderado" (10/3/6/5) y `claude_model = NULL` (= usa el default de `ANTHROPIC_MODEL`).
-- `getSettings(pool)` / `saveSettings(pool, settings)`: leen/escriben esa fila. `BotSettings = { riskPreset, riskProfile: { positionSizePct, stopLossPct, takeProfitPct, maxPositions }, claudeModel }`.
+- `setupSettingsSchema(pool)`: crea `bot_settings (id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1), risk_preset TEXT, position_size_pct NUMERIC, stop_loss_pct NUMERIC, take_profit_pct NUMERIC, max_positions INTEGER, claude_model TEXT, updated_at TIMESTAMPTZ)` si no existe, agrega `trading_enabled BOOLEAN NOT NULL DEFAULT TRUE` vía `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, y siembra la única fila (`id = 1`) con el perfil "moderado" (10/3/6/5) y `claude_model = NULL` (= usa el default de `ANTHROPIC_MODEL`).
+- `getSettings(pool)` / `saveSettings(pool, settings)`: leen/escriben esa fila. `BotSettings = { riskPreset, riskProfile: { positionSizePct, stopLossPct, takeProfitPct, maxPositions }, claudeModel, tradingEnabled }`. `saveSettings` solo escribe `riskPreset`/`riskProfile`/`claudeModel` (no toca `trading_enabled`).
+- `setTradingEnabled(pool, enabled)`: actualiza únicamente `trading_enabled` (usado por el interruptor ON/OFF, ver más abajo).
 - `RISK_PROFILE` / `RISK_PROFILE_PRESETS` (`src/strategy/config.ts`) son ahora solo **defaults/semillas**; la fuente de verdad en runtime es `bot_settings`.
 
 ### Presets de perfil de riesgo
@@ -265,16 +274,27 @@ El modelo elegido se usa para `assessWatchlist()` (evaluación batched del ciclo
 
 ### Endpoints `/api/settings`
 
-- `GET /api/settings` → `{ ok, settings: BotSettings, presets: RISK_PROFILE_PRESETS, models: CLAUDE_MODEL_OPTIONS }`.
-- `POST /api/settings` → valida `riskPreset` (∈ `conservador|moderado|agresivo|personalizado`), `riskProfile` (`positionSizePct` ∈ (0,1], `stopLossPct` ∈ (0,1), `takeProfitPct` ∈ (0,2), `maxPositions` entero ∈ [1,20]) y `claudeModel` (∈ `CLAUDE_MODEL_OPTIONS` o `null`); responde `400` con mensaje en español si algo no valida, o `{ ok: true, savedAt }` si guarda correctamente.
+- `GET /api/settings` → `{ ok, settings: BotSettings, presets: RISK_PROFILE_PRESETS, models: CLAUDE_MODEL_OPTIONS }` (`BotSettings` incluye `tradingEnabled`).
+- `POST /api/settings` → valida `riskPreset` (∈ `conservador|moderado|agresivo|personalizado`), `riskProfile` (`positionSizePct` ∈ (0,1], `stopLossPct` ∈ (0,1), `takeProfitPct` ∈ (0,2), `maxPositions` entero ∈ [1,20]) y `claudeModel` (∈ `CLAUDE_MODEL_OPTIONS` o `null`); responde `400` con mensaje en español si algo no valida, o `{ ok: true, savedAt }` si guarda correctamente. No toca `trading_enabled`.
+- `POST /api/settings/trading-enabled` → body `{ enabled: boolean }`; valida que `enabled` sea boolean (`400` si no), llama a `setTradingEnabled(pool, enabled)` y responde `{ ok: true, tradingEnabled: enabled, savedAt }`.
+
+### Interruptor ON/OFF de órdenes a Alpaca
+
+En el header del dashboard, junto al título, hay un indicador ("Órdenes a Alpaca: ACTIVADAS"/"DESACTIVADAS") y un botón ("⏸ Desactivar"/"▶ Activar") que llaman a `POST /api/settings/trading-enabled` (con `window.confirm` antes de cada cambio, ya que afecta trading real en paper).
+
+- **ON** (`trading_enabled = true`, default): comportamiento normal, sin cambios.
+- **OFF** (`trading_enabled = false`): en `runTradingCycle()`, cualquier señal `BUY`/`SELL` que llegue a la "pasada 2" genera una acción `{ type: 'TRADING_DISABLED', symbol }` (impresa como `⏸️` por `src/trade.ts`) en vez de colocar/cancelar/cerrar órdenes en Alpaca. Las señales `HOLD` siguen generando `NO_ACTION` igual que siempre. El cálculo de señales (pasada 1), la fase de IA y `saveSignal`/`saveAssessment` **no se ven afectados** - el dashboard sigue mostrando datos frescos por símbolo aunque el bot esté en OFF.
+- Pensado como el equivalente más cercano a un "dry-run": útil para pausar la colocación de órdenes (p.ej. mantenimiento, revisión manual de posiciones) sin perder visibilidad de señales/IA/backtesting.
 
 ### Sección "Configuración" del frontend
 
-Ubicada entre "Ingesta de datos" y "Trading (paper)". Incluye:
+Ubicada entre "Ingesta de datos" y "Resumen por símbolo". Incluye:
 
 - Selector de preset de riesgo (Conservador/Moderado/Agresivo/Personalizado) + 4 campos numéricos (tamaño de posición, stop-loss, take-profit, máx. posiciones). Elegir un preset rellena los 4 campos; editar cualquiera a mano cambia el preset a "Personalizado".
 - Selector de modelo de Claude (las 3 opciones curadas).
 - Botón "💾 Guardar" (`POST /api/settings`).
+
+El interruptor ON/OFF de órdenes a Alpaca vive aparte, en el header (ver arriba) - no requiere "Guardar" y aplica de inmediato.
 
 Los cambios aplican desde el próximo ciclo de trading/backtest, sin reiniciar el dashboard ni el bot (el dashboard nunca corre como systemd, ver "Levantar/parar el dashboard web").
 
@@ -311,7 +331,7 @@ La subida a MinIO es **best-effort**: si falla (p.ej. MinIO caído), se loguea e
 
 `src/server.ts` levanta un servidor Express (puerto `WEB_PORT`, por defecto `4000`) que sirve un frontend estático (`public/`) y una API mínima:
 
-- `GET /` - dashboard web (health checks, botón de ingesta, panel de trading y panel de Grafana embebido).
+- `GET /` - dashboard web (health checks, interruptor ON/OFF de órdenes a Alpaca, ingesta manual, configuración y resumen por símbolo).
 - `GET /api/health` - ejecuta las 10 verificaciones de `src/diagnostics.ts` (las mismas que `npm run dev`) y devuelve JSON con el estado de cada servicio.
 - `GET /api/config` - expone configuración pública para el frontend (por ahora, `grafanaPublicUrl`).
 - `POST /api/ingest` - ejecuta `src/ingestRunner.ts` (misma lógica que `npm run ingest`) y devuelve un resumen JSON.
@@ -322,40 +342,39 @@ La subida a MinIO es **best-effort**: si falla (p.ej. MinIO caído), se loguea e
 - `GET /api/backtesting/results` - última corrida de backtest persistida, con sus trades.
 - `GET /api/assessments` - última evaluación de IA (Claude) por símbolo (ver más arriba). Devuelve `[]` mientras la fase de IA no haya corrido (p.ej. si falló la última llamada a Claude).
 - `GET /api/settings` / `POST /api/settings` - leer/guardar el perfil de riesgo, preset y modelo de Claude activos (`bot_settings`, ver más arriba).
+- `POST /api/settings/trading-enabled` - activar/desactivar el interruptor de órdenes a Alpaca (`bot_settings.trading_enabled`, ver "Interruptor ON/OFF de órdenes a Alpaca" más arriba).
 - `GET /api/snapshots` - lista los snapshots más recientes (ingesta + trading, hasta 30) guardados en MinIO, con `{ key, size, lastModified, type: 'ingest' | 'trading' }` (ver más arriba).
 - `GET /api/snapshots/download?key=...` - descarga el contenido JSON de un snapshot. Valida que `key` tenga el formato `(ingest|trading)/<...>.json` para evitar acceso a otros objetos del bucket.
 
-### Sección "Trading (paper)" del frontend
+### Sección "Resumen por símbolo" del frontend
 
-El panel se divide en dos sub-secciones, **ETFs** y **Acciones**, cada una con:
+Sección única que fusiona trading, evaluaciones de IA y backtesting - reemplaza las antiguas secciones separadas "Trading (paper)", "Evaluaciones de IA (Claude)" y "Backtesting". Muestra primero los datos de cuenta (`GET /api/trading/status`) y el resumen de la última corrida de backtest (período cubierto + resumen de portafolio, `GET /api/backtesting/results`), y luego dos sub-secciones, **ETFs** y **Acciones**, con una **tarjeta por símbolo** (`renderSymbolCard`) que funciona como mini-informe:
 
-- Una tabla (`renderSignalsTable`) con columnas: Símbolo, Precio, SMA10, SMA30, RSI, Mom., **Precio est. entrada**, **Precio est. salida**, Señal, Motivo.
-- Una lista de gráficos por símbolo (uno debajo del otro, ancho completo - `.chart-grid` en columna), cada uno con:
-  - Línea de **Precio** (cierre diario, azul).
-  - Línea de **SMA10** (verde) y **SMA30** (naranja).
-  - Franja horizontal punteada de **Precio est. entrada** (amarillo).
-  - Franja horizontal punteada de **Precio est. salida** (violeta).
-  - Si no hay datos históricos todavía, muestra un mensaje en vez del gráfico.
+- **Encabezado**: símbolo + badge de señal (`BUY`/`SELL`/`HOLD`).
+- **Datos**: Precio, SMA10, SMA30, RSI, Momentum, **Precio est. entrada**, **Precio est. salida** y el motivo de la señal.
+- **Posición abierta** (si existe): cantidad, precio de entrada, precio actual, valor y P/L no realizado (desde `positions` de `/api/trading/status`).
+- **Gráfico** (`/api/trading/chart/:symbol`): Precio (azul), SMA10 (verde), SMA30 (naranja), y franjas horizontales punteadas de Precio est. entrada (amarillo) y Precio est. salida (violeta). Si no hay datos históricos todavía, muestra un mensaje en vez del gráfico.
+- **Evaluación de IA**: recomendación, score, confianza, fecha, ajuste entrada/salida (`—` si Claude no propuso nada) y justificación (desde `GET /api/assessments`), o "Sin evaluación todavía" si la fase de IA no corrió para ese símbolo.
+- **Backtest**: trades, win rate, retorno total, retorno promedio y max drawdown (desde `summary.symbols` de `GET /api/backtesting/results`), o "Sin backtest todavía" si el símbolo no está en la última corrida.
 
-Ambas sub-secciones (tabla y gráficos) se ordenan de mayor a menor según `attractivenessScore(signal)` (`public/app.js`): puntaje compuesto que prioriza señal BUY > HOLD > SELL, y dentro de cada una favorece momentum positivo, RSI cercano a neutral (no sobrecomprado/sobrevendido) y tendencia alcista (SMA10 > SMA30).
+Las tarjetas de cada sub-sección se ordenan de mayor a menor según `attractivenessScore(signal)` (`public/app.js`): puntaje compuesto que prioriza señal BUY > HOLD > SELL, y dentro de cada una favorece momentum positivo, RSI cercano a neutral (no sobrecomprado/sobrevendido) y tendencia alcista (SMA10 > SMA30).
 
-### Sección "Evaluaciones de IA (Claude)" del frontend
+Al final de la sección, dos tablas (igual que en la antigua sección "Trading (paper)"):
 
-Tabla con columnas Símbolo, Fecha, Score, Recomendación, Confianza, Ajuste entrada, Ajuste salida (`—` si Claude no propuso nada) y Justificación, poblada desde `GET /api/assessments` (última evaluación por símbolo). Se refresca cada 60s y con un botón manual. Vacía mientras la fase de IA no haya corrido.
+- **Posiciones abiertas**: Símbolo, Cantidad, Precio entrada, Precio actual, Valor, P/L no realizado.
+- **Órdenes ejecutadas**: Fecha, Símbolo, Lado, Cantidad, Tipo, TP, SL, Estado (`GET /api/trading/status`, últimas 20).
+
+Los botones "🤖 Ejecutar ciclo de trading" (`POST /api/trading/run`) y "📊 Ejecutar backtest" (`POST /api/backtesting/run`) están en el header de esta sección; ambos refrescan toda la sección (`loadSymbolReports()`) al terminar. Toda la sección se refresca automáticamente cada 60s.
 
 ### Sección "Snapshots (MinIO)" del frontend
 
 Tabla (`renderSnapshots`) con columnas Tipo, Fecha, Tamaño y un enlace de descarga, poblada desde `GET /api/snapshots` (hasta 30 snapshots, ingesta + trading mezclados y ordenados por fecha). Se refresca con el botón "🔄 Actualizar" y automáticamente después de ejecutar una ingesta o un ciclo de trading desde el dashboard.
 
-### Sección "Backtesting" del frontend
-
-Muestra el período cubierto por la última corrida, una tabla resumen por símbolo (trades, win rate, retorno total, retorno promedio, max drawdown), el resumen de portafolio y un botón "Ejecutar backtest" que llama a `POST /api/backtesting/run`. Los datos se cargan desde `GET /api/backtesting/results` (ver más arriba).
-
 El resto del frontend (`public/index.html`, `public/app.js`, `public/styles.css`):
 
 - Muestra una tarjeta por servicio con su estado (✅/❌) y detalle, refrescando cada 60s.
 - Permite disparar la ingesta manualmente y ver el resultado.
-- Embebe el dashboard "Vibe Bots - Overview" de Grafana vía `<iframe>`, usando la URL de `GRAFANA_PUBLIC_URL`.
+- El dashboard "Vibe Bots - Overview" de Grafana ya **no** está embebido aquí (ver "Grafana" más abajo); `GRAFANA_PUBLIC_URL` queda configurado pero sin uso desde `public/`.
 
 `src/diagnostics.ts` y `src/ingestRunner.ts` son los módulos compartidos: `src/index.ts` (CLI) y `src/ingest.ts` (CLI) son ahora wrappers delgados sobre ellos, para que la CLI y el dashboard web ejecuten exactamente la misma lógica.
 
@@ -380,7 +399,7 @@ Grafana corre como servicio nativo (`systemctl status grafana-server`) en `http:
 - **Embedding**: `/etc/grafana/grafana.ini` tiene `[security] allow_embedding = true` (cambio manual a nivel de sistema, fuera de este repo). `auth.anonymous` permanece deshabilitado.
 - **Acceso público acotado**: el dashboard "Vibe Bots - Overview" está compartido como [Public Dashboard](https://grafana.com/docs/grafana/latest/dashboards/sharing-dashboards-panels/shared-dashboards/) (`POST /api/dashboards/uid/<uid>/public-dashboards`), por lo que es accesible sin login solo a través de su URL pública (`GRAFANA_PUBLIC_URL`). El resto de Grafana (admin, otros dashboards) sigue requiriendo autenticación.
 
-> ⏳ **Pendiente**: ambos dashboards tienen `fieldConfig.defaults.custom` agregado a los paneles de tipo `timeseries` (versión 2, re-publicados vía API), pero al momento de escribir esto los paneles seguían sin mostrar datos visualmente en el iframe embebido. Queda pendiente de diagnóstico/verificación visual; no es bloqueante para el resto de la funcionalidad del bot (ver "Próximas fases" al final).
+> ⏳ **Pendiente**: ambos dashboards tienen `fieldConfig.defaults.custom` agregado a los paneles de tipo `timeseries` (versión 2, re-publicados vía API), pero al momento de escribir esto los paneles seguían sin mostrar datos visualmente. El iframe de "Vibe Bots - Overview" se quitó del dashboard web (2026-06-14, ver "Sección 'Resumen por símbolo'"); Grafana en sí sigue corriendo igual, accesible directamente. Queda pendiente de diagnóstico/verificación visual; no es bloqueante para el resto de la funcionalidad del bot (ver "Próximas fases" al final).
 
 ## Base de datos - tablas clave
 
@@ -390,7 +409,7 @@ Grafana corre como servicio nativo (`systemctl status grafana-server`) en `http:
 - `ai_assessments` (independiente, sin FK): `symbol, ts, score, recommendation, confidence, rationale, model, adjusted_entry_price, adjusted_exit_price` - una fila por símbolo en cada ciclo donde corrió la fase de IA (ver "Capa de IA (Claude)" más arriba). Las dos últimas columnas son las propuestas crudas de Claude antes del recorte ±10%.
 - `backtest_runs`: `id, run_at, symbols, start_date, end_date, params JSONB, summary JSONB`.
 - `backtest_trades`: `id, run_id` (FK a `backtest_runs`), `symbol, entry_date, entry_price, exit_date, exit_price, exit_reason, pnl_pct` (ver "Backtesting" más arriba).
-- `bot_settings` (singleton `id=1`): `risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, updated_at` - perfil de riesgo y modelo de Claude activos (ver "Configuración dinámica (`bot_settings`)" más arriba).
+- `bot_settings` (singleton `id=1`): `risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, updated_at` - perfil de riesgo, modelo de Claude e interruptor ON/OFF de órdenes activos (ver "Configuración dinámica (`bot_settings`)" más arriba).
 
 `setupTradingSchema` (`src/services/tradingStore.ts`) crea las tablas si no existen y agrega columnas nuevas vía `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (no hay framework de migraciones). Se ejecuta al inicio de `runTradingCycle()`; `GET /api/trading/status` no la ejecuta, así que columnas nuevas deben existir ya en la base (aplicadas manualmente o mediante un `npm run trade` previo) para que ese endpoint no falle. `setupBacktestSchema` (`src/services/backtestStore.ts`) crea `backtest_runs`/`backtest_trades` y se ejecuta al inicio de `runBacktestForWatchlist()` y de `GET /api/backtesting/results`.
 
@@ -401,13 +420,13 @@ Ver también `CLAUDE.md` (contexto denso para Claude Code) y `AGENTS.md` (reglas
 Mapa rápido de módulos (todos operativos):
 
 1. **Ingesta de datos en PostgreSQL** (`src/ingest.ts`, `src/ingestRunner.ts`): bars, noticias, fundamentales y series macro para 20 símbolos (11 ETFs + 9 acciones).
-2. **Redis**: caché de quotes (Finnhub) - pendiente extender a estado/colas de órdenes (ver roadmap).
-3. **Dashboard web** (`src/server.ts` + `public/`): health checks, ingesta manual, panel de trading (ETF/Acciones, ranking por atractivo, gráficos con bandas de entrada/salida), sección "Configuración", backtesting, evaluaciones de IA, snapshots y panel de Grafana embebido (Public Dashboard, ⏳ sin verificación visual completa).
-4. **Estrategia + ejecución automática de órdenes vía Alpaca** (`src/strategy/`, `src/tradingRunner.ts`, `npm run trade`): señales SMA10/SMA30 + RSI + momentum, precio estimado de entrada/salida, perfil de riesgo dinámico (`bot_settings`) y bracket orders **límite** en paper. Persistencia en `trading_signals`/`trading_orders`, expuesto en `/api/trading/*`, dashboard web y Grafana.
+2. **Redis** (`src/services/cache.ts`, ver sección "Caché en Redis"): quotes de Finnhub, resultados de `/api/health` por API externa (TTLs según cuota, p.ej. 2h para Alpha Vantage) y estado de Alpaca (cuenta/posiciones/órdenes abiertas) compartido entre `runTradingCycle()` y `GET /api/trading/status` para reducir llamadas a Alpaca desde el polling del dashboard.
+3. **Dashboard web** (`src/server.ts` + `public/`): health checks, ingesta manual, interruptor ON/OFF de órdenes a Alpaca (header), sección "Configuración" y sección "Resumen por símbolo" (un mini-informe por símbolo - señal/gráfico, evaluación de IA y backtest -, ETF/Acciones, ranking por atractivo, terminando con posiciones abiertas y órdenes ejecutadas).
+4. **Estrategia + ejecución automática de órdenes vía Alpaca** (`src/strategy/`, `src/tradingRunner.ts`, `npm run trade`): señales SMA10/SMA30 + RSI + momentum, precio estimado de entrada/salida, perfil de riesgo dinámico (`bot_settings`) y bracket orders **límite** en paper - salvo que el interruptor ON/OFF del dashboard esté en OFF (`TRADING_DISABLED`). Persistencia en `trading_signals`/`trading_orders`, expuesto en `/api/trading/*`, dashboard web y Grafana.
 5. **Snapshots de ingesta/trading en MinIO** (`src/services/storage.ts`): cada `npm run ingest`/`npm run trade` sube un snapshot JSON crudo (`ingest/<ts>.json` / `trading/<ts>.json`), listado y descargable desde el dashboard (`GET /api/snapshots`, `GET /api/snapshots/download`). Subida best-effort (no rompe la corrida si MinIO falla). Backup periódico de PostgreSQL a MinIO queda diferido (ver roadmap).
-6. **Backtesting** (`src/strategy/backtest.ts`, `src/backtestRunner.ts`, `npm run backtest`): simula la estrategia real sobre el histórico de `market_bars` por símbolo usando el perfil de riesgo activo de `bot_settings`, persiste en `backtest_runs`/`backtest_trades`, expuesto en `/api/backtesting/*` y la sección "Backtesting" del dashboard. `npm run backfill-history` (opcional, no corrido aún) permite ampliar el histórico para backtests más largos.
-7. **Capa de IA (Claude)** (`src/services/claude.ts`, `src/tradingRunner.ts`): **activa desde 2026-06-14** (`ANTHROPIC_API_KEY` configurada) - evaluación batched (técnico + precios estimados + fundamentales FMP + noticias + macro FRED) que puede vetar señales BUY (`AI_BLOCKED`) y proponer ajustes acotados a `estimatedEntryPrice`/`estimatedExitPrice`; persistida en `ai_assessments` y expuesta en `GET /api/assessments` + sección "Evaluaciones de IA (Claude)" del dashboard. Fail-open si la llamada a Claude falla.
-8. **Configuración dinámica** (`bot_settings`, `src/services/settingsStore.ts`): perfil de riesgo (con presets Conservador/Moderado/Agresivo/Personalizado), modelo de Claude (lista curada de 3) y límite de ajuste de precios de IA (±10%), editables desde la sección "Configuración" del dashboard (`GET`/`POST /api/settings`) y leídos en caliente por `runTradingCycle()`/`runBacktestForWatchlist()`/`GET /api/trading/status`. `RISK_PROFILE`/`RISK_PROFILE_PRESETS` (`strategy/config.ts`) quedan como defaults/semillas.
+6. **Backtesting** (`src/strategy/backtest.ts`, `src/backtestRunner.ts`, `npm run backtest`): simula la estrategia real sobre el histórico de `market_bars` por símbolo usando el perfil de riesgo activo de `bot_settings`, persiste en `backtest_runs`/`backtest_trades`, expuesto en `/api/backtesting/*` y, por símbolo, en la sección "Resumen por símbolo" del dashboard. `npm run backfill-history` (opcional, no corrido aún) permite ampliar el histórico para backtests más largos.
+7. **Capa de IA (Claude)** (`src/services/claude.ts`, `src/tradingRunner.ts`): **activa desde 2026-06-14** (`ANTHROPIC_API_KEY` configurada) - evaluación batched (técnico + precios estimados + fundamentales FMP + noticias + macro FRED) que puede vetar señales BUY (`AI_BLOCKED`) y proponer ajustes acotados a `estimatedEntryPrice`/`estimatedExitPrice`; persistida en `ai_assessments` y expuesta en `GET /api/assessments` + sección "Resumen por símbolo" del dashboard. Fail-open si la llamada a Claude falla.
+8. **Configuración dinámica** (`bot_settings`, `src/services/settingsStore.ts`): perfil de riesgo (con presets Conservador/Moderado/Agresivo/Personalizado), modelo de Claude (lista curada de 3), límite de ajuste de precios de IA (±10%) e interruptor ON/OFF de órdenes a Alpaca (`trading_enabled`), editables desde el dashboard (`GET`/`POST /api/settings`, `POST /api/settings/trading-enabled`) y leídos en caliente por `runTradingCycle()`/`runBacktestForWatchlist()`/`GET /api/trading/status`. `RISK_PROFILE`/`RISK_PROFILE_PRESETS` (`strategy/config.ts`) quedan como defaults/semillas.
 
 ## Próximas fases (mejoras propuestas)
 
@@ -416,11 +435,10 @@ Ideas de evolución, no implementadas todavía - priorizar según valor/esfuerzo
 1. **Backtesting de portafolio (v2)**: hoy cada símbolo se simula de forma independiente (% de retorno aislado, sin equity/cash compartido ni cap real de posiciones simultáneas); modelar el portafolio completo daría retornos más realistas y comparables al trading en vivo.
 2. **Backfill histórico**: ejecutar `npm run backfill-history` (ya implementado, nunca corrido) para extender `market_bars` de ~150 a ~1095 días y tener backtests con más regímenes de mercado.
 3. **Backups automáticos de PostgreSQL**: `pg_dump` periódico (cron) subido a MinIO junto a los snapshots de ingesta/trading.
-4. **Verificación visual de Grafana embebido**: los paneles `timeseries` del Public Dashboard no muestran datos en el iframe pese a `fieldConfig.defaults.custom`; diagnosticar y corregir.
+4. **Verificación visual de Grafana**: los paneles `timeseries` del Public Dashboard "Vibe Bots - Overview" no muestran datos pese a `fieldConfig.defaults.custom`; diagnosticar y corregir (independiente del dashboard web, donde el iframe ya no está embebido).
 5. **Cron intradía**: evaluar `*/30 13-21 * * 1-5` (cada 30 min) si se requiere reaccionar más rápido a fills de órdenes límite o señales SELL.
 6. **Tests automatizados**: no hay suite de tests; agregar unit tests para `strategy/` (señales, backtest, `applyPriceAdjustment`) e integración para `settingsStore`/`tradingRunner`.
 7. **Escalado de la capa de IA**: si el watchlist crece, dividir la llamada batched a Claude en lotes para no exceder límites de tokens/tool-use; considerar evaluación incremental (solo símbolos con señal BUY).
 8. **Historial de configuración**: `bot_settings` es una fila singleton sin auditoría; agregar una tabla `bot_settings_history` para ver cuándo/quién cambió el perfil de riesgo o el modelo de Claude.
 9. **Watchlist dinámica**: `WATCHLIST` es una constante en código (`src/watchlist.ts`); permitir agregar/quitar símbolos desde el dashboard, igual que `bot_settings`.
 10. **Alertas**: notificaciones (email/Telegram/Slack) ante `AI_BLOCKED`, ajustes de precio de IA descartados por exceder ±10%, o fallos repetidos de la capa de IA/ingesta.
-11. **Más uso de Redis**: hoy solo cachea quotes de Finnhub; extender a estado de órdenes pendientes/colas para reducir llamadas a Alpaca.

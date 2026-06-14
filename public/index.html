@@ -9,8 +9,16 @@
 </head>
 <body>
   <header>
-    <h1>🤖 Vibe Bots</h1>
-    <p class="subtitle">Panel de control - Fase 1.5</p>
+    <div class="header-top">
+      <div>
+        <h1>🤖 Vibe Bots</h1>
+        <p class="subtitle">Panel de control</p>
+      </div>
+      <div class="trading-toggle">
+        <span id="trading-toggle-status" class="muted">Órdenes a Alpaca: cargando...</span>
+        <button id="trading-toggle-btn" disabled>Cambiar</button>
+      </div>
+    </div>
   </header>
 
   <main>
@@ -48,8 +56,8 @@
       </div>
       <p class="muted">
         Perfil de riesgo y modelo de Claude usados por el próximo ciclo de trading/backtest
-        (afecta a las secciones Trading, Evaluaciones de IA y Backtesting). Los cambios se
-        aplican desde el próximo ciclo, sin reiniciar el dashboard ni el bot.
+        (afecta a la sección "Resumen por símbolo"). Los cambios se aplican desde el próximo
+        ciclo, sin reiniciar el dashboard ni el bot.
       </p>
 
       <h3>Perfil de riesgo</h3>
@@ -81,7 +89,7 @@
         </label>
       </div>
 
-      <h3>Modelo de Claude (evaluación de IA, Fase 4)</h3>
+      <h3>Modelo de Claude (evaluación de IA)</h3>
       <div class="form-grid">
         <label class="form-field">
           Modelo
@@ -94,50 +102,34 @@
 
     <section class="card">
       <div class="section-header">
-        <h2>Trading (Fase 2 - paper)</h2>
-        <button id="run-trade">🤖 Ejecutar ciclo de trading</button>
+        <h2>Resumen por símbolo (trading, IA y backtesting)</h2>
+        <div class="section-actions">
+          <button id="run-trade">🤖 Ejecutar ciclo de trading</button>
+          <button id="run-backtest">📊 Ejecutar backtest</button>
+        </div>
       </div>
       <p class="muted">
-        Calcula señales (SMA10/SMA30 + RSI + momentum) y, según el perfil de riesgo moderado
-        (10% del equity por posición, stop -3% / take-profit +6%, máx. 5 posiciones), abre o
-        cierra posiciones con bracket orders en la cuenta <strong>paper</strong> de Alpaca.
+        Para cada símbolo del watchlist: señal técnica (SMA10/SMA30 + RSI + momentum), gráfico
+        de precio con bandas de entrada/salida estimadas, evaluación de Claude (técnico +
+        fundamentales + noticias + macro, solo puede <strong>vetar</strong> señales BUY) y
+        resultado del backtest sobre el historial disponible. Ordenados de más a menos
+        atractivos según señal, momentum, RSI y tendencia SMA10/SMA30.
+      </p>
+      <p class="muted">
+        "Ejecutar ciclo de trading" puede abrir o cerrar posiciones reales (dinero simulado) en
+        la cuenta <strong>paper</strong> de Alpaca, salvo que el interruptor "Órdenes a Alpaca"
+        (arriba) esté desactivado, en cuyo caso solo se actualizan señales y evaluaciones.
       </p>
 
       <div id="trading-account" class="muted"></div>
+      <div id="backtesting-period" class="muted"></div>
+      <div id="backtesting-portfolio" class="muted"></div>
 
       <h3>ETFs</h3>
-      <p class="muted">Ordenados de más a menos atractivos según señal, momentum, RSI y tendencia SMA10/SMA30.</p>
-      <div class="table-wrap">
-        <table id="signals-table-etf">
-          <thead>
-            <tr>
-              <th>Símbolo</th><th>Precio</th><th>SMA10</th><th>SMA30</th><th>RSI</th><th>Mom.</th>
-              <th title="Precio al que el cierre de la próxima sesión haría que SMA10 alcance la SMA30 actual">Precio est. entrada</th>
-              <th title="Precio objetivo de take-profit: precio est. entrada + take-profit del perfil de riesgo">Precio est. salida</th>
-              <th>Señal</th><th>Motivo</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div id="signal-charts-etf" class="chart-grid"></div>
+      <div id="symbol-reports-etf" class="symbol-report-grid"></div>
 
       <h3>Acciones</h3>
-      <p class="muted">Ordenadas de más a menos atractivas según señal, momentum, RSI y tendencia SMA10/SMA30.</p>
-      <div class="table-wrap">
-        <table id="signals-table-stock">
-          <thead>
-            <tr>
-              <th>Símbolo</th><th>Precio</th><th>SMA10</th><th>SMA30</th><th>RSI</th><th>Mom.</th>
-              <th title="Precio al que el cierre de la próxima sesión haría que SMA10 alcance la SMA30 actual">Precio est. entrada</th>
-              <th title="Precio objetivo de take-profit: precio est. entrada + take-profit del perfil de riesgo">Precio est. salida</th>
-              <th>Señal</th><th>Motivo</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div id="signal-charts-stock" class="chart-grid"></div>
+      <div id="symbol-reports-stock" class="symbol-report-grid"></div>
 
       <h3>Posiciones abiertas</h3>
       <div class="table-wrap">
@@ -149,7 +141,7 @@
         </table>
       </div>
 
-      <h3>Órdenes recientes</h3>
+      <h3>Órdenes ejecutadas</h3>
       <div class="table-wrap">
         <table id="orders-table">
           <thead>
@@ -160,36 +152,7 @@
       </div>
 
       <pre id="trade-result" class="result"></pre>
-    </section>
-
-    <section class="card">
-      <div class="section-header">
-        <h2>Evaluaciones de IA (Claude)</h2>
-        <div class="section-actions">
-          <span id="assessments-updated" class="muted"></span>
-          <button id="refresh-assessments">🔄 Actualizar</button>
-        </div>
-      </div>
-      <p class="muted">
-        Evaluación de Claude para cada símbolo (técnico + fundamentales + noticias + macro),
-        calculada una vez por ciclo de trading. Solo puede <strong>vetar</strong> una señal BUY
-        (recomendación "avoid" → acción <code>AI_BLOCKED</code>); nunca genera compras ni bloquea
-        ventas. Mientras falte <code>ANTHROPIC_API_KEY</code>, esta sección queda vacía y el
-        ciclo de trading sigue igual que antes (fail-open).
-      </p>
-      <div class="table-wrap">
-        <table id="assessments-table">
-          <thead>
-            <tr>
-              <th>Símbolo</th><th>Fecha</th><th>Score</th><th>Recomendación</th><th>Confianza</th>
-              <th title="Precio de entrada propuesto por Claude (— si no propuso ninguno)">Ajuste entrada</th>
-              <th title="Precio de salida propuesto por Claude (— si no propuso ninguno)">Ajuste salida</th>
-              <th>Justificación</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
+      <pre id="backtesting-result" class="result"></pre>
     </section>
 
     <section class="card">
@@ -212,46 +175,10 @@
         </table>
       </div>
     </section>
-
-    <section class="card">
-      <div class="section-header">
-        <h2>Backtesting</h2>
-        <div class="section-actions">
-          <span id="backtesting-updated" class="muted"></span>
-          <button id="run-backtest">📊 Ejecutar backtest</button>
-        </div>
-      </div>
-      <p class="muted">
-        Simula la estrategia (Fase 2) símbolo por símbolo sobre el historial diario disponible,
-        en % de retorno (sin modelar equity/cash compartido ni el cap de posiciones). Usa las
-        mismas reglas que las bracket orders reales: entrada límite al precio est., take-profit
-        +6% / stop-loss -3%, o salida por señal SELL.
-      </p>
-      <div id="backtesting-period" class="muted"></div>
-      <div class="table-wrap">
-        <table id="backtesting-table">
-          <thead>
-            <tr><th>Símbolo</th><th>Trades</th><th>Win rate</th><th>Retorno total</th><th>Retorno prom.</th><th>Max drawdown</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div id="backtesting-portfolio" class="muted"></div>
-      <pre id="backtesting-result" class="result"></pre>
-    </section>
-
-    <section class="card">
-      <div class="section-header">
-        <h2>Grafana</h2>
-      </div>
-      <div id="grafana-container">
-        <p class="muted">Cargando dashboard de Grafana...</p>
-      </div>
-    </section>
   </main>
 
   <footer>
-    <p class="muted">Vibe Bots · Fase 1.5 · Dashboard web</p>
+    <p class="muted">Vibe Bots · Dashboard web</p>
   </footer>
 
   <script src="/app.js"></script>

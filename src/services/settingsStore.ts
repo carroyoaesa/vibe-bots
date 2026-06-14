@@ -22,17 +22,20 @@ export async function setupSettingsSchema(pool: Pool): Promise<void> {
      ON CONFLICT (id) DO NOTHING`,
     [RISK_PROFILE.positionSizePct, RISK_PROFILE.stopLossPct, RISK_PROFILE.takeProfitPct, RISK_PROFILE.maxPositions]
   );
+
+  await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS trading_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
 }
 
 export interface BotSettings {
   riskPreset: string;
   riskProfile: RiskProfile;
   claudeModel: string | null;
+  tradingEnabled: boolean;
 }
 
 export async function getSettings(pool: Pool): Promise<BotSettings> {
   const result = await pool.query(
-    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model
+    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled
      FROM bot_settings WHERE id = 1`
   );
 
@@ -47,10 +50,11 @@ export async function getSettings(pool: Pool): Promise<BotSettings> {
       maxPositions: Number(row.max_positions),
     },
     claudeModel: row.claude_model,
+    tradingEnabled: row.trading_enabled,
   };
 }
 
-export async function saveSettings(pool: Pool, settings: BotSettings): Promise<void> {
+export async function saveSettings(pool: Pool, settings: Pick<BotSettings, 'riskPreset' | 'riskProfile' | 'claudeModel'>): Promise<void> {
   await pool.query(
     `UPDATE bot_settings
      SET risk_preset = $1, position_size_pct = $2, stop_loss_pct = $3, take_profit_pct = $4,
@@ -64,5 +68,12 @@ export async function saveSettings(pool: Pool, settings: BotSettings): Promise<v
       settings.riskProfile.maxPositions,
       settings.claudeModel,
     ]
+  );
+}
+
+export async function setTradingEnabled(pool: Pool, enabled: boolean): Promise<void> {
+  await pool.query(
+    `UPDATE bot_settings SET trading_enabled = $1, updated_at = NOW() WHERE id = 1`,
+    [enabled]
   );
 }

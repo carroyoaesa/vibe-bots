@@ -1,6 +1,16 @@
-import { loadAlpacaConfig, loadPostgresConfig, loadMinioConfig, loadAnthropicConfig } from './config';
+import { loadAlpacaConfig, loadPostgresConfig, loadMinioConfig, loadAnthropicConfig, loadRedisConfig } from './config';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, putJsonSnapshot } from './services/storage';
+import {
+  createRedisClient,
+  setCachedJson,
+  ALPACA_ACCOUNT_CACHE_KEY,
+  ALPACA_ACCOUNT_CACHE_TTL_SECONDS,
+  ALPACA_POSITIONS_CACHE_KEY,
+  ALPACA_POSITIONS_CACHE_TTL_SECONDS,
+  ALPACA_OPEN_ORDERS_CACHE_KEY,
+  ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS,
+} from './services/cache';
 import {
   getCloses,
   getLatestFundamentals,
@@ -31,6 +41,7 @@ export type TradingAction =
   | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number; stopLossPrice: number; alpacaOrderId: string }
   | { type: 'CLOSE_POSITION'; symbol: string; qty: number; alpacaOrderId?: string }
   | { type: 'AI_BLOCKED'; symbol: string; reason: string }
+  | { type: 'TRADING_DISABLED'; symbol: string }
   | { type: 'NO_ACTION'; symbol: string; reason: string }
   | { type: 'SKIPPED'; symbol: string; reason: string }
   | { type: 'ERROR'; symbol: string; error: string };
@@ -66,6 +77,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
   const pool = createPostgresPool(postgresConfig);
   const alpacaClient = createAlpacaClient(alpacaConfig);
+  const redis = createRedisClient(loadRedisConfig());
 
   try {
     await setupTradingSchema(pool);
@@ -75,6 +87,17 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     const account = await getAccount(alpacaClient);
     const positions = await getPositions(alpacaClient);
     const openOrders = await getOpenOrders(alpacaClient);
+
+    // Refresca la caché de estado de Alpaca (cuenta, posiciones, órdenes abiertas) que usa
+    // /api/trading/status, para que el siguiente poll del dashboard no repita estas llamadas.
+    // Las decisiones de trading de abajo SIEMPRE usan los valores recién obtenidos, no la caché.
+    await Promise.all([
+      setCachedJson(redis, ALPACA_ACCOUNT_CACHE_KEY, account, ALPACA_ACCOUNT_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_POSITIONS_CACHE_KEY, positions, ALPACA_POSITIONS_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_OPEN_ORDERS_CACHE_KEY, openOrders, ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS),
+    ]).catch((error) => {
+      console.warn('No se pudo refrescar la caché de Alpaca en Redis:', error instanceof Error ? error.message : error);
+    });
 
     const positionsBySymbol = new Map(positions.map((p) => [p.symbol, p]));
     const openOrdersBySymbol = new Map<string, AlpacaOrder[]>();
@@ -182,7 +205,11 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         const position = positionsBySymbol.get(symbol);
         const symbolOpenOrders = openOrdersBySymbol.get(symbol) ?? [];
 
-        if (signal.signal === 'BUY') {
+        if (!settings.tradingEnabled && signal.signal !== 'HOLD') {
+          // Interruptor ON/OFF del dashboard: bloquea tanto compras como ventas, pero las
+          // señales y evaluaciones de IA ya se calcularon/guardaron arriba normalmente.
+          actions.push({ type: 'TRADING_DISABLED', symbol });
+        } else if (signal.signal === 'BUY') {
           if (position) {
             actions.push({ type: 'NO_ACTION', symbol, reason: 'Ya existe una posición abierta' });
           } else if (symbolOpenOrders.length > 0) {
@@ -288,6 +315,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
     return { account, signals, actions, snapshotKey };
   } finally {
+    await redis.quit();
     await pool.end();
   }
 }

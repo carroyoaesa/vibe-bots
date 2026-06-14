@@ -1,12 +1,22 @@
 import path from 'path';
 import express from 'express';
-import { loadWebConfig, loadAlpacaConfig, loadPostgresConfig, loadMinioConfig } from './config';
+import { loadWebConfig, loadAlpacaConfig, loadPostgresConfig, loadMinioConfig, loadRedisConfig } from './config';
 import { runDiagnostics } from './diagnostics';
 import { runIngest } from './ingestRunner';
 import { runTradingCycle } from './tradingRunner';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, listSnapshots, getSnapshotStream } from './services/storage';
-import { createAlpacaClient, getAccount, getPositions } from './services/alpaca';
+import { createAlpacaClient, getAccount, getPositions, AlpacaOrder } from './services/alpaca';
+import {
+  createRedisClient,
+  getCachedJson,
+  getCachedOrFetch,
+  ALPACA_ACCOUNT_CACHE_KEY,
+  ALPACA_ACCOUNT_CACHE_TTL_SECONDS,
+  ALPACA_POSITIONS_CACHE_KEY,
+  ALPACA_POSITIONS_CACHE_TTL_SECONDS,
+  ALPACA_OPEN_ORDERS_CACHE_KEY,
+} from './services/cache';
 import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals } from './services/tradingStore';
 import { getRecentBars, getCloses } from './services/marketStore';
 import { buildChartSeries } from './strategy/chart';
@@ -15,7 +25,7 @@ import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
 import { runBacktestForWatchlist } from './backtestRunner';
-import { setupSettingsSchema, getSettings, saveSettings } from './services/settingsStore';
+import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
 
 const CHART_LOOKBACK_BARS = 90;
@@ -49,16 +59,23 @@ app.get('/api/health', async (_req, res) => {
 app.get('/api/trading/status', async (_req, res) => {
   const pool = createPostgresPool(loadPostgresConfig());
   const alpacaClient = createAlpacaClient(loadAlpacaConfig());
+  const redis = createRedisClient(loadRedisConfig());
 
   try {
     await setupSettingsSchema(pool);
     const settings = await getSettings(pool);
 
-    const [account, positions, orders, latestSignals] = await Promise.all([
-      getAccount(alpacaClient),
-      getPositions(alpacaClient),
+    const [account, positions, orders, latestSignals, openOrdersCache] = await Promise.all([
+      // Cuenta y posiciones se cachean en Redis (TTLs cortos) y se comparten con el check
+      // "alpaca" de /api/health y con runTradingCycle(), para no pedirle a Alpaca lo mismo
+      // dos veces en cada poll de 60s del dashboard.
+      getCachedOrFetch(redis, ALPACA_ACCOUNT_CACHE_KEY, ALPACA_ACCOUNT_CACHE_TTL_SECONDS, () => getAccount(alpacaClient)),
+      getCachedOrFetch(redis, ALPACA_POSITIONS_CACHE_KEY, ALPACA_POSITIONS_CACHE_TTL_SECONDS, () => getPositions(alpacaClient)),
       getRecentOrders(pool, 20),
       getLatestSignals(pool),
+      // Las órdenes abiertas solo se refrescan en runTradingCycle(); aquí se leen de caché
+      // sin disparar una llamada extra a Alpaca (si no hay caché todavía, queda en null).
+      getCachedJson<AlpacaOrder[]>(redis, ALPACA_OPEN_ORDERS_CACHE_KEY),
     ]);
 
     const latestBySymbol = new Map(latestSignals.map((row) => [row.symbol, row]));
@@ -80,10 +97,14 @@ app.get('/api/trading/status', async (_req, res) => {
       })
     );
 
-    res.json({ ok: true, generatedAt: new Date().toISOString(), account, positions, signals, orders });
+    const openOrdersCount = openOrdersCache?.value.length ?? null;
+    const openOrdersAt = openOrdersCache?.cachedAt ?? null;
+
+    res.json({ ok: true, generatedAt: new Date().toISOString(), account, positions, signals, orders, openOrdersCount, openOrdersAt });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {
+    await redis.quit();
     await pool.end();
   }
 });
@@ -187,6 +208,28 @@ app.post('/api/settings', async (req, res) => {
     });
 
     res.json({ ok: true, savedAt: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.post('/api/settings/trading-enabled', async (req, res) => {
+  const enabled = req.body?.enabled;
+
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ ok: false, error: 'enabled debe ser boolean.' });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSettingsSchema(pool);
+    await setTradingEnabled(pool, enabled);
+
+    res.json({ ok: true, tradingEnabled: enabled, savedAt: new Date().toISOString() });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

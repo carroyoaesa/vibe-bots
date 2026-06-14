@@ -8,6 +8,8 @@ function describeAction(action: Awaited<ReturnType<typeof runTradingCycle>>['act
       return `🔴 SELL ${action.symbol}: cierre de ${action.qty} acciones - orden ${action.alpacaOrderId ?? 'n/a'}`;
     case 'AI_BLOCKED':
       return `🤖🚫 ${action.symbol}: BUY vetado por IA (${action.reason})`;
+    case 'TRADING_DISABLED':
+      return `⏸️  ${action.symbol}: trading desactivado (interruptor ON/OFF)`;
     case 'SKIPPED':
       return `⏭️  ${action.symbol}: omitido (${action.reason})`;
     case 'ERROR':

@@ -3,7 +3,9 @@ const healthUpdated = document.getElementById('health-updated');
 const refreshHealthBtn = document.getElementById('refresh-health');
 const runIngestBtn = document.getElementById('run-ingest');
 const ingestResult = document.getElementById('ingest-result');
-const grafanaContainer = document.getElementById('grafana-container');
+
+const tradingToggleStatus = document.getElementById('trading-toggle-status');
+const tradingToggleBtn = document.getElementById('trading-toggle-btn');
 
 const riskPresetSelect = document.getElementById('risk-preset');
 const riskPositionSizeInput = document.getElementById('risk-position-size');
@@ -16,31 +18,23 @@ const settingsResult = document.getElementById('settings-result');
 const settingsUpdated = document.getElementById('settings-updated');
 
 const tradingAccount = document.getElementById('trading-account');
-const signalsTableBodyEtf = document.querySelector('#signals-table-etf tbody');
-const signalsTableBodyStock = document.querySelector('#signals-table-stock tbody');
-const signalChartsEtf = document.getElementById('signal-charts-etf');
-const signalChartsStock = document.getElementById('signal-charts-stock');
+const backtestingPeriod = document.getElementById('backtesting-period');
+const backtestingPortfolio = document.getElementById('backtesting-portfolio');
+const symbolReportsEtf = document.getElementById('symbol-reports-etf');
+const symbolReportsStock = document.getElementById('symbol-reports-stock');
 const positionsTableBody = document.querySelector('#positions-table tbody');
 const ordersTableBody = document.querySelector('#orders-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
 const tradeResult = document.getElementById('trade-result');
+const runBacktestBtn = document.getElementById('run-backtest');
+const backtestingResult = document.getElementById('backtesting-result');
 
 const snapshotsTableBody = document.querySelector('#snapshots-table tbody');
 const refreshSnapshotsBtn = document.getElementById('refresh-snapshots');
 const snapshotsUpdated = document.getElementById('snapshots-updated');
 
-const assessmentsTableBody = document.querySelector('#assessments-table tbody');
-const refreshAssessmentsBtn = document.getElementById('refresh-assessments');
-const assessmentsUpdated = document.getElementById('assessments-updated');
-
-const backtestingTableBody = document.querySelector('#backtesting-table tbody');
-const backtestingPeriod = document.getElementById('backtesting-period');
-const backtestingPortfolio = document.getElementById('backtesting-portfolio');
-const runBacktestBtn = document.getElementById('run-backtest');
-const backtestingResult = document.getElementById('backtesting-result');
-const backtestingUpdated = document.getElementById('backtesting-updated');
-
 const chartInstances = {};
+let tradingEnabled = true;
 
 function renderHealth(data) {
   healthGrid.innerHTML = '';
@@ -110,6 +104,45 @@ async function runIngest() {
   }
 }
 
+function renderTradingToggle(enabled) {
+  tradingEnabled = enabled;
+  tradingToggleStatus.textContent = enabled
+    ? 'Órdenes a Alpaca: ACTIVADAS'
+    : 'Órdenes a Alpaca: DESACTIVADAS (compra y venta bloqueadas)';
+  tradingToggleStatus.classList.toggle('toggle-on', enabled);
+  tradingToggleStatus.classList.toggle('toggle-off', !enabled);
+  tradingToggleBtn.textContent = enabled ? '⏸ Desactivar' : '▶ Activar';
+  tradingToggleBtn.disabled = false;
+}
+
+async function toggleTradingEnabled() {
+  const next = !tradingEnabled;
+  const confirmMessage = next
+    ? 'Esto reactiva las órdenes a Alpaca: el bot podrá volver a abrir y cerrar posiciones reales (dinero simulado) en la cuenta paper. ¿Continuar?'
+    : 'Esto desactiva las órdenes a Alpaca: el bot dejará de abrir y cerrar posiciones, pero seguirá calculando señales y evaluaciones de IA. ¿Continuar?';
+
+  if (!window.confirm(confirmMessage)) return;
+
+  tradingToggleBtn.disabled = true;
+  try {
+    const res = await fetch('/api/settings/trading-enabled', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      renderTradingToggle(data.tradingEnabled);
+    } else {
+      tradingToggleBtn.disabled = false;
+      window.alert(`Error: ${data.error}`);
+    }
+  } catch (error) {
+    tradingToggleBtn.disabled = false;
+    window.alert(`Error: ${error}`);
+  }
+}
+
 let riskPresets = {};
 
 function fillRiskInputs(riskProfile) {
@@ -141,6 +174,8 @@ async function loadSettings() {
     riskPresetSelect.value = data.settings.riskPreset;
     fillRiskInputs(data.settings.riskProfile);
     claudeModelSelect.value = data.settings.claudeModel || data.models[0].id;
+
+    renderTradingToggle(data.settings.tradingEnabled);
 
     settingsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -194,6 +229,12 @@ function signalClass(signal) {
   return 'signal-hold';
 }
 
+function recommendationClass(recommendation) {
+  if (recommendation === 'buy') return 'signal-buy';
+  if (recommendation === 'avoid') return 'signal-sell';
+  return 'signal-hold';
+}
+
 /**
  * Puntaje de "qué tan conveniente es comprar ahora": prioriza señal BUY/HOLD/SELL,
  * y dentro de cada una favorece momentum positivo, RSI cercano a neutral (no sobrecomprado)
@@ -208,107 +249,127 @@ function attractivenessScore(signal) {
   return signalScore * 10 + momentumScore + rsiScore + trendScore * 10;
 }
 
-function renderSignalsTable(tbody, signals) {
-  tbody.innerHTML = '';
-  if (signals.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
-    return;
+function renderSymbolStats(signal) {
+  const stat = (label, value) => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>`;
+
+  return [
+    stat('Precio', fmtMoney(signal.price)),
+    stat('SMA10', fmtNum(signal.smaFast)),
+    stat('SMA30', fmtNum(signal.smaSlow)),
+    stat('RSI', fmtNum(signal.rsi)),
+    stat('Momentum', signal.momentum !== null ? `${fmtNum(signal.momentum)}%` : '—'),
+    stat('Precio est. entrada', signal.estimatedEntryPrice !== null ? fmtMoney(signal.estimatedEntryPrice) : '—'),
+    stat('Precio est. salida', signal.estimatedExitPrice !== null ? fmtMoney(signal.estimatedExitPrice) : '—'),
+  ].join('');
+}
+
+function renderPositionLine(position) {
+  if (!position) {
+    return '<p class="muted">Sin posición abierta.</p>';
   }
 
-  signals.forEach((signal) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${signal.symbol}</td>
-      <td>${fmtMoney(signal.price)}</td>
-      <td>${fmtNum(signal.smaFast)}</td>
-      <td>${fmtNum(signal.smaSlow)}</td>
-      <td>${fmtNum(signal.rsi)}</td>
-      <td>${signal.momentum !== null ? `${fmtNum(signal.momentum)}%` : '—'}</td>
-      <td>${signal.estimatedEntryPrice !== null ? fmtMoney(signal.estimatedEntryPrice) : '—'}</td>
-      <td>${signal.estimatedExitPrice !== null ? fmtMoney(signal.estimatedExitPrice) : '—'}</td>
-      <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
-      <td class="muted">${signal.reason}</td>
+  return `<p class="muted">Posición abierta: ${fmtNum(position.qty, 0)} acciones · entrada ${fmtMoney(position.avgEntryPrice)} · ` +
+    `actual ${fmtMoney(position.currentPrice)} · valor ${fmtMoney(position.marketValue)} · ` +
+    `P/L <span class="${position.unrealizedPl >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtMoney(position.unrealizedPl)}</span></p>`;
+}
+
+function renderAssessmentBlock(assessment) {
+  if (!assessment) {
+    return '<p class="muted">Sin evaluación todavía (requiere ANTHROPIC_API_KEY y un ciclo de trading).</p>';
+  }
+
+  return `
+    <p>
+      <span class="${recommendationClass(assessment.recommendation)}">${assessment.recommendation.toUpperCase()}</span>
+      · Score ${fmtNum(assessment.score)} · Confianza ${assessment.confidence !== null ? fmtNum(assessment.confidence) : '—'}
+      · ${new Date(assessment.ts).toLocaleString()}
+    </p>
+    <p class="muted">
+      Ajuste entrada: ${assessment.adjustedEntryPrice !== null ? fmtMoney(assessment.adjustedEntryPrice) : '—'}
+      · Ajuste salida: ${assessment.adjustedExitPrice !== null ? fmtMoney(assessment.adjustedExitPrice) : '—'}
+    </p>
+    <p class="muted">${assessment.rationale ?? ''}</p>
+  `;
+}
+
+function renderBacktestBlock(summary) {
+  if (!summary) {
+    return '<p class="muted">Sin backtest todavía. Ejecutá un backtest.</p>';
+  }
+
+  return `
+    <p class="muted">
+      Trades: ${summary.trades} · Win rate: ${summary.winRate !== null ? `${fmtNum(summary.winRate, 1)}%` : '—'} ·
+      Retorno total: <span class="${summary.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(summary.totalReturnPct)}%</span> ·
+      Retorno prom.: ${summary.avgReturnPct !== null ? `${fmtNum(summary.avgReturnPct)}%` : '—'} ·
+      Max drawdown: ${fmtNum(summary.maxDrawdownPct)}%
+    </p>
+  `;
+}
+
+function renderSymbolCard(container, index, signal, assessment, backtestSummary, position) {
+  const symbol = signal.symbol;
+  let card = document.getElementById(`symbol-card-${symbol}`);
+
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'symbol-report-card';
+    card.id = `symbol-card-${symbol}`;
+    card.innerHTML = `
+      <div class="symbol-report-header">
+        <h4>${symbol}</h4>
+        <span class="signal-badge"></span>
+      </div>
+      <div class="symbol-stats-grid"></div>
+      <p class="muted symbol-reason"></p>
+      <div class="symbol-position"></div>
+      <div class="chart-canvas-wrap">
+        <canvas></canvas>
+      </div>
+      <p class="muted chart-no-data hidden">Sin datos históricos todavía. Ejecutá la ingesta.</p>
+      <div class="symbol-subsection">
+        <h5>Evaluación de IA (Claude)</h5>
+        <div class="symbol-assessment"></div>
+      </div>
+      <div class="symbol-subsection">
+        <h5>Backtest</h5>
+        <div class="symbol-backtest"></div>
+      </div>
     `;
-    tbody.appendChild(tr);
-  });
-}
-
-function renderTradingStatus(data) {
-  const { account, positions, signals, orders } = data;
-
-  tradingAccount.textContent =
-    `Cuenta ${account.accountNumber} (${account.status}) · Equity: ${fmtMoney(account.equity)} · ` +
-    `Cash: ${fmtMoney(account.cash)} · Buying power: ${fmtMoney(account.buyingPower)}`;
-
-  const etfSignals = signals.filter((signal) => signal.type === 'ETF').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
-  const stockSignals = signals.filter((signal) => signal.type === 'STOCK').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
-
-  renderSignalsTable(signalsTableBodyEtf, etfSignals);
-  renderSignalsTable(signalsTableBodyStock, stockSignals);
-
-  renderSignalCharts(signalChartsEtf, etfSignals);
-  renderSignalCharts(signalChartsStock, stockSignals);
-
-  positionsTableBody.innerHTML = '';
-  if (positions.length === 0) {
-    positionsTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin posiciones abiertas.</td></tr>';
-  } else {
-    positions.forEach((position) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${position.symbol}</td>
-        <td>${fmtNum(position.qty, 0)}</td>
-        <td>${fmtMoney(position.avgEntryPrice)}</td>
-        <td>${fmtMoney(position.currentPrice)}</td>
-        <td>${fmtMoney(position.marketValue)}</td>
-        <td class="${position.unrealizedPl >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtMoney(position.unrealizedPl)}</td>
-      `;
-      positionsTableBody.appendChild(tr);
-    });
+    container.appendChild(card);
   }
 
-  ordersTableBody.innerHTML = '';
-  if (orders.length === 0) {
-    ordersTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin órdenes registradas.</td></tr>';
-  } else {
-    orders.forEach((order) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${new Date(order.ts).toLocaleString()}</td>
-        <td>${order.symbol}</td>
-        <td>${order.side.toUpperCase()}</td>
-        <td>${fmtNum(order.qty, 0)}</td>
-        <td>${order.orderType}</td>
-        <td>${order.takeProfitPrice !== null ? fmtMoney(order.takeProfitPrice) : '—'}</td>
-        <td>${order.stopLossPrice !== null ? fmtMoney(order.stopLossPrice) : '—'}</td>
-        <td>${order.status}</td>
-      `;
-      ordersTableBody.appendChild(tr);
-    });
+  // Mantener el orden según el ranking de atractivo.
+  if (container.children[index] !== card) {
+    container.insertBefore(card, container.children[index] ?? null);
   }
+
+  const badge = card.querySelector('.signal-badge');
+  badge.className = `signal-badge ${signalClass(signal.signal)}`;
+  badge.textContent = signal.signal;
+
+  card.querySelector('.symbol-stats-grid').innerHTML = renderSymbolStats(signal);
+  card.querySelector('.symbol-reason').textContent = `Motivo: ${signal.reason}`;
+  card.querySelector('.symbol-position').innerHTML = renderPositionLine(position);
+  card.querySelector('.symbol-assessment').innerHTML = renderAssessmentBlock(assessment);
+  card.querySelector('.symbol-backtest').innerHTML = renderBacktestBlock(backtestSummary);
+
+  return {
+    signal,
+    canvas: card.querySelector('canvas'),
+    noDataMsg: card.querySelector('.chart-no-data'),
+  };
 }
 
-async function renderSignalCharts(container, signals) {
+function renderSymbolReportsGroup(container, signals, assessmentsBySymbol, backtestSummaryBySymbol, positionsBySymbol) {
   if (signals.length === 0) {
-    container.innerHTML = '<p class="muted">Sin datos todavía. Ejecutá la ingesta y un ciclo de trading.</p>';
-    return;
+    container.innerHTML = '<p class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</p>';
+    return [];
   }
 
-  const results = await Promise.all(
-    signals.map(async (signal) => {
-      try {
-        const res = await fetch(`/api/trading/chart/${signal.symbol}`);
-        const data = await res.json();
-        return { symbol: signal.symbol, ok: data.ok, points: data.points, error: data.error };
-      } catch (error) {
-        return { symbol: signal.symbol, ok: false, error: String(error) };
-      }
-    })
-  );
-
-  const seenSymbols = new Set(results.map((result) => result.symbol));
-  container.querySelectorAll('.chart-card').forEach((card) => {
-    const symbol = card.id.replace('chart-card-', '');
+  const seenSymbols = new Set(signals.map((signal) => signal.symbol));
+  container.querySelectorAll('.symbol-report-card').forEach((card) => {
+    const symbol = card.id.replace('symbol-card-', '');
     if (!seenSymbols.has(symbol)) {
       if (chartInstances[symbol]) {
         chartInstances[symbol].destroy();
@@ -318,46 +379,37 @@ async function renderSignalCharts(container, signals) {
     }
   });
 
-  results.forEach((result, index) => {
-    let card = document.getElementById(`chart-card-${result.symbol}`);
-    let canvas;
-    let noDataMsg;
+  return signals.map((signal, index) => renderSymbolCard(
+    container,
+    index,
+    signal,
+    assessmentsBySymbol.get(signal.symbol),
+    backtestSummaryBySymbol.get(signal.symbol),
+    positionsBySymbol.get(signal.symbol)
+  ));
+}
 
-    if (!card) {
-      card = document.createElement('div');
-      card.className = 'chart-card';
-      card.id = `chart-card-${result.symbol}`;
+async function renderSymbolCharts(entries) {
+  if (entries.length === 0) return;
 
-      const title = document.createElement('h4');
-      title.textContent = result.symbol;
-      card.appendChild(title);
+  const results = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        const res = await fetch(`/api/trading/chart/${entry.signal.symbol}`);
+        const data = await res.json();
+        return { ...entry, ok: data.ok, points: data.points, error: data.error };
+      } catch (error) {
+        return { ...entry, ok: false, error: String(error) };
+      }
+    })
+  );
 
-      const canvasWrap = document.createElement('div');
-      canvasWrap.className = 'chart-canvas-wrap';
+  results.forEach((result) => {
+    const { signal, canvas, noDataMsg } = result;
 
-      canvas = document.createElement('canvas');
-      canvasWrap.appendChild(canvas);
-      card.appendChild(canvasWrap);
-
-      noDataMsg = document.createElement('p');
-      noDataMsg.className = 'muted chart-no-data';
-      noDataMsg.textContent = 'Sin datos históricos todavía. Ejecutá la ingesta.';
-      card.appendChild(noDataMsg);
-
-      container.appendChild(card);
-    } else {
-      canvas = card.querySelector('canvas');
-      noDataMsg = card.querySelector('.chart-no-data');
-    }
-
-    // Mantener el orden según el ranking de atractivo.
-    if (container.children[index] !== card) {
-      container.insertBefore(card, container.children[index] ?? null);
-    }
-
-    if (chartInstances[result.symbol]) {
-      chartInstances[result.symbol].destroy();
-      delete chartInstances[result.symbol];
+    if (chartInstances[signal.symbol]) {
+      chartInstances[signal.symbol].destroy();
+      delete chartInstances[signal.symbol];
     }
 
     if (!result.ok || !result.points || result.points.length === 0) {
@@ -404,8 +456,7 @@ async function renderSignalCharts(container, signals) {
       },
     ];
 
-    const signal = signals.find((s) => s.symbol === result.symbol);
-    if (signal && signal.estimatedEntryPrice !== null) {
+    if (signal.estimatedEntryPrice !== null) {
       datasets.push({
         label: 'Precio est. entrada',
         data: labels.map(() => signal.estimatedEntryPrice),
@@ -417,7 +468,7 @@ async function renderSignalCharts(container, signals) {
         tension: 0,
       });
     }
-    if (signal && signal.estimatedExitPrice !== null) {
+    if (signal.estimatedExitPrice !== null) {
       datasets.push({
         label: 'Precio est. salida',
         data: labels.map(() => signal.estimatedExitPrice),
@@ -430,7 +481,7 @@ async function renderSignalCharts(container, signals) {
       });
     }
 
-    chartInstances[result.symbol] = new Chart(canvas, {
+    chartInstances[signal.symbol] = new Chart(canvas, {
       type: 'line',
       data: {
         labels,
@@ -452,24 +503,133 @@ async function renderSignalCharts(container, signals) {
   });
 }
 
-async function loadTradingStatus() {
+function renderPositionsTable(positions) {
+  positionsTableBody.innerHTML = '';
+  if (positions.length === 0) {
+    positionsTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin posiciones abiertas.</td></tr>';
+    return;
+  }
+
+  positions.forEach((position) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${position.symbol}</td>
+      <td>${fmtNum(position.qty, 0)}</td>
+      <td>${fmtMoney(position.avgEntryPrice)}</td>
+      <td>${fmtMoney(position.currentPrice)}</td>
+      <td>${fmtMoney(position.marketValue)}</td>
+      <td class="${position.unrealizedPl >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtMoney(position.unrealizedPl)}</td>
+    `;
+    positionsTableBody.appendChild(tr);
+  });
+}
+
+function renderOrdersTable(orders) {
+  ordersTableBody.innerHTML = '';
+  if (orders.length === 0) {
+    ordersTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin órdenes registradas.</td></tr>';
+    return;
+  }
+
+  orders.forEach((order) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${new Date(order.ts).toLocaleString()}</td>
+      <td>${order.symbol}</td>
+      <td>${order.side.toUpperCase()}</td>
+      <td>${fmtNum(order.qty, 0)}</td>
+      <td>${order.orderType}</td>
+      <td>${order.takeProfitPrice !== null ? fmtMoney(order.takeProfitPrice) : '—'}</td>
+      <td>${order.stopLossPrice !== null ? fmtMoney(order.stopLossPrice) : '—'}</td>
+      <td>${order.status}</td>
+    `;
+    ordersTableBody.appendChild(tr);
+  });
+}
+
+function renderBacktestingSummary(run) {
+  if (!run) {
+    backtestingPeriod.textContent = '';
+    backtestingPortfolio.textContent = '';
+    return;
+  }
+
+  const { run: meta, trades } = run;
+  const summary = meta.summary || {};
+  const portfolio = summary.portfolio || {};
+
+  const startDate = meta.startDate ? String(meta.startDate).slice(0, 10) : 'n/a';
+  const endDate = meta.endDate ? String(meta.endDate).slice(0, 10) : 'n/a';
+
+  backtestingPeriod.textContent =
+    `Backtest - Periodo: ${startDate} → ${endDate} ` +
+    `(última corrida: ${new Date(meta.runAt).toLocaleString()}, ${trades.length} trades guardados)`;
+
+  backtestingPortfolio.textContent =
+    `Portafolio: ${portfolio.symbols ?? '—'} símbolos · ${portfolio.totalTrades ?? 0} trades · ` +
+    `retorno prom. ${portfolio.avgReturnPct !== null && portfolio.avgReturnPct !== undefined ? `${fmtNum(portfolio.avgReturnPct)}%` : '—'} · ` +
+    `win rate prom. ${portfolio.avgWinRatePct !== null && portfolio.avgWinRatePct !== undefined ? `${fmtNum(portfolio.avgWinRatePct, 1)}%` : '—'} · ` +
+    `mejor: ${portfolio.bestSymbol ?? '—'} · peor: ${portfolio.worstSymbol ?? '—'}`;
+}
+
+async function loadSymbolReports() {
   try {
-    const res = await fetch('/api/trading/status');
-    const data = await res.json();
-    if (data.ok) {
-      renderTradingStatus(data);
-    } else {
-      tradingAccount.textContent = `Error al cargar estado de trading: ${data.error}`;
+    const [statusRes, assessmentsRes, backtestingRes] = await Promise.all([
+      fetch('/api/trading/status'),
+      fetch('/api/assessments'),
+      fetch('/api/backtesting/results'),
+    ]);
+
+    const statusData = await statusRes.json();
+    if (!statusData.ok) {
+      tradingAccount.textContent = `Error al cargar estado de trading: ${statusData.error}`;
+      return;
     }
+
+    const assessmentsData = await assessmentsRes.json();
+    const backtestingData = await backtestingRes.json();
+
+    const { account, positions, signals, orders, openOrdersCount } = statusData;
+
+    const openOrdersText = typeof openOrdersCount === 'number'
+      ? ` · Órdenes abiertas en Alpaca: ${openOrdersCount}`
+      : '';
+
+    tradingAccount.textContent =
+      `Cuenta ${account.accountNumber} (${account.status}) · Equity: ${fmtMoney(account.equity)} · ` +
+      `Cash: ${fmtMoney(account.cash)} · Buying power: ${fmtMoney(account.buyingPower)}${openOrdersText}`;
+
+    const assessmentsBySymbol = new Map(
+      (assessmentsData.ok ? assessmentsData.assessments : []).map((a) => [a.symbol, a])
+    );
+    const positionsBySymbol = new Map(positions.map((p) => [p.symbol, p]));
+
+    const run = backtestingData.ok ? backtestingData.run : null;
+    renderBacktestingSummary(run);
+    const backtestSummaryBySymbol = new Map(
+      (run?.run?.summary?.symbols ?? []).map((s) => [s.symbol, s])
+    );
+
+    const etfSignals = signals.filter((signal) => signal.type === 'ETF').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
+    const stockSignals = signals.filter((signal) => signal.type === 'STOCK').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
+
+    const etfEntries = renderSymbolReportsGroup(symbolReportsEtf, etfSignals, assessmentsBySymbol, backtestSummaryBySymbol, positionsBySymbol);
+    const stockEntries = renderSymbolReportsGroup(symbolReportsStock, stockSignals, assessmentsBySymbol, backtestSummaryBySymbol, positionsBySymbol);
+
+    await Promise.all([renderSymbolCharts(etfEntries), renderSymbolCharts(stockEntries)]);
+
+    renderPositionsTable(positions);
+    renderOrdersTable(orders);
   } catch (error) {
-    tradingAccount.textContent = `Error al cargar estado de trading: ${error}`;
+    tradingAccount.textContent = `Error al cargar resumen por símbolo: ${error}`;
   }
 }
 
 async function runTradingCycle() {
   const confirmed = window.confirm(
     'Esto calcula señales y, según el perfil de riesgo, puede abrir o cerrar posiciones REALES ' +
-    '(con dinero simulado) en la cuenta paper de Alpaca. ¿Continuar?'
+    '(con dinero simulado) en la cuenta paper de Alpaca, salvo que el interruptor "Órdenes a Alpaca" ' +
+    'esté desactivado. ¿Continuar?'
   );
   if (!confirmed) return;
 
@@ -480,7 +640,7 @@ async function runTradingCycle() {
     const data = await res.json();
     tradeResult.textContent = JSON.stringify(data, null, 2);
     if (data.ok) {
-      await loadTradingStatus();
+      await loadSymbolReports();
       await loadSnapshots();
     }
   } catch (error) {
@@ -534,112 +694,6 @@ async function loadSnapshots() {
   }
 }
 
-function recommendationClass(recommendation) {
-  if (recommendation === 'buy') return 'signal-buy';
-  if (recommendation === 'avoid') return 'signal-sell';
-  return 'signal-hold';
-}
-
-function renderAssessments(assessments) {
-  assessmentsTableBody.innerHTML = '';
-  if (assessments.length === 0) {
-    assessmentsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin evaluaciones todavía (requiere ANTHROPIC_API_KEY y un ciclo de trading).</td></tr>';
-    return;
-  }
-
-  assessments.forEach((assessment) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${assessment.symbol}</td>
-      <td>${new Date(assessment.ts).toLocaleString()}</td>
-      <td>${fmtNum(assessment.score)}</td>
-      <td><span class="${recommendationClass(assessment.recommendation)}">${assessment.recommendation.toUpperCase()}</span></td>
-      <td>${assessment.confidence !== null ? fmtNum(assessment.confidence) : '—'}</td>
-      <td>${assessment.adjustedEntryPrice !== null ? fmtMoney(assessment.adjustedEntryPrice) : '—'}</td>
-      <td>${assessment.adjustedExitPrice !== null ? fmtMoney(assessment.adjustedExitPrice) : '—'}</td>
-      <td class="muted">${assessment.rationale ?? ''}</td>
-    `;
-    assessmentsTableBody.appendChild(tr);
-  });
-}
-
-async function loadAssessments() {
-  refreshAssessmentsBtn.disabled = true;
-  try {
-    const res = await fetch('/api/assessments');
-    const data = await res.json();
-    if (data.ok) {
-      renderAssessments(data.assessments);
-      assessmentsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
-    } else {
-      assessmentsTableBody.innerHTML = `<tr><td colspan="8" class="muted">Error: ${data.error}</td></tr>`;
-    }
-  } catch (error) {
-    assessmentsTableBody.innerHTML = `<tr><td colspan="8" class="muted">Error al cargar evaluaciones: ${error}</td></tr>`;
-  } finally {
-    refreshAssessmentsBtn.disabled = false;
-  }
-}
-
-function renderBacktesting(run) {
-  if (!run) {
-    backtestingTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin corridas todavía. Ejecutá un backtest.</td></tr>';
-    backtestingPeriod.textContent = '';
-    backtestingPortfolio.textContent = '';
-    return;
-  }
-
-  const { run: meta, trades } = run;
-  const summary = meta.summary || {};
-  const symbols = summary.symbols || [];
-  const portfolio = summary.portfolio || {};
-
-  const startDate = meta.startDate ? String(meta.startDate).slice(0, 10) : 'n/a';
-  const endDate = meta.endDate ? String(meta.endDate).slice(0, 10) : 'n/a';
-  backtestingPeriod.textContent =
-    `Periodo: ${startDate} → ${endDate} ` +
-    `(última corrida: ${new Date(meta.runAt).toLocaleString()}, ${trades.length} trades guardados)`;
-
-  backtestingTableBody.innerHTML = '';
-  if (symbols.length === 0) {
-    backtestingTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin resultados por símbolo.</td></tr>';
-  } else {
-    symbols.forEach((s) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${s.symbol}</td>
-        <td>${s.trades}</td>
-        <td>${s.winRate !== null ? `${fmtNum(s.winRate, 1)}%` : '—'}</td>
-        <td class="${s.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(s.totalReturnPct)}%</td>
-        <td>${s.avgReturnPct !== null ? `${fmtNum(s.avgReturnPct)}%` : '—'}</td>
-        <td>${fmtNum(s.maxDrawdownPct)}%</td>
-      `;
-      backtestingTableBody.appendChild(tr);
-    });
-  }
-
-  backtestingPortfolio.textContent =
-    `Portafolio: ${portfolio.symbols ?? '—'} símbolos · ${portfolio.totalTrades ?? 0} trades · ` +
-    `retorno prom. ${portfolio.avgReturnPct !== null && portfolio.avgReturnPct !== undefined ? `${fmtNum(portfolio.avgReturnPct)}%` : '—'} · ` +
-    `win rate prom. ${portfolio.avgWinRatePct !== null && portfolio.avgWinRatePct !== undefined ? `${fmtNum(portfolio.avgWinRatePct, 1)}%` : '—'} · ` +
-    `mejor: ${portfolio.bestSymbol ?? '—'} · peor: ${portfolio.worstSymbol ?? '—'}`;
-}
-
-async function loadBacktesting() {
-  try {
-    const res = await fetch('/api/backtesting/results');
-    const data = await res.json();
-    if (data.ok) {
-      renderBacktesting(data.run);
-      backtestingUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
-    } else {
-      backtestingTableBody.innerHTML = `<tr><td colspan="6" class="muted">Error: ${data.error}</td></tr>`;
-    }
-  } catch (error) {
-    backtestingTableBody.innerHTML = `<tr><td colspan="6" class="muted">Error al cargar backtesting: ${error}</td></tr>`;
-  }
-}
-
 async function runBacktest() {
   runBacktestBtn.disabled = true;
   backtestingResult.textContent = 'Ejecutando backtest...';
@@ -648,7 +702,7 @@ async function runBacktest() {
     const data = await res.json();
     backtestingResult.textContent = JSON.stringify(data, null, 2);
     if (data.ok) {
-      await loadBacktesting();
+      await loadSymbolReports();
     }
   } catch (error) {
     backtestingResult.textContent = `Error: ${error}`;
@@ -657,33 +711,13 @@ async function runBacktest() {
   }
 }
 
-async function loadGrafana() {
-  try {
-    const res = await fetch('/api/config');
-    const data = await res.json();
-
-    if (data.grafanaPublicUrl) {
-      grafanaContainer.innerHTML = '';
-      const iframe = document.createElement('iframe');
-      iframe.src = data.grafanaPublicUrl;
-      iframe.title = 'Vibe Bots - Grafana';
-      iframe.loading = 'lazy';
-      grafanaContainer.appendChild(iframe);
-    } else {
-      grafanaContainer.innerHTML = '<p class="muted">Configura GRAFANA_PUBLIC_URL para mostrar el dashboard aquí.</p>';
-    }
-  } catch (error) {
-    grafanaContainer.innerHTML = `<p class="muted">Error al cargar configuración de Grafana: ${error}</p>`;
-  }
-}
-
 refreshHealthBtn.addEventListener('click', loadHealth);
 runIngestBtn.addEventListener('click', runIngest);
 runTradeBtn.addEventListener('click', runTradingCycle);
 refreshSnapshotsBtn.addEventListener('click', loadSnapshots);
-refreshAssessmentsBtn.addEventListener('click', loadAssessments);
 runBacktestBtn.addEventListener('click', runBacktest);
 saveSettingsBtn.addEventListener('click', saveSettings);
+tradingToggleBtn.addEventListener('click', toggleTradingEnabled);
 
 riskPresetSelect.addEventListener('change', () => {
   const preset = riskPresetSelect.value;
@@ -699,12 +733,8 @@ riskPresetSelect.addEventListener('change', () => {
 });
 
 loadHealth();
-loadGrafana();
 loadSettings();
-loadTradingStatus();
+loadSymbolReports();
 loadSnapshots();
-loadAssessments();
-loadBacktesting();
 setInterval(loadHealth, 60000);
-setInterval(loadTradingStatus, 60000);
-setInterval(loadAssessments, 60000);
+setInterval(loadSymbolReports, 60000);
