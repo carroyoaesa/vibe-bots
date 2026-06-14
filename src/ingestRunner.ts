@@ -5,13 +5,15 @@ import {
   loadFinnhubConfig,
   loadPostgresConfig,
   loadRedisConfig,
+  loadMinioConfig,
 } from './config';
 import { createMarketDataClient, getDailyBars, getNews } from './services/marketData';
-import { createFmpClient, getCompanyProfile } from './services/fmp';
-import { createFinnhubClient, getQuote } from './services/finnhub';
-import { createFredClient, getSeriesObservations } from './services/fred';
+import { createFmpClient, getCompanyProfile, CompanyProfile } from './services/fmp';
+import { createFinnhubClient, getQuote, Quote } from './services/finnhub';
+import { createFredClient, getSeriesObservations, MacroObservation } from './services/fred';
 import { createPostgresPool } from './services/db';
 import { createRedisClient } from './services/cache';
+import { createMinioClient, putJsonSnapshot } from './services/storage';
 import { setupIngestSchema, saveDailyBars, saveNews, saveFundamentalsSnapshot, saveMacroObservations } from './services/marketStore';
 import { WATCHLIST, MACRO_SERIES, BARS_LOOKBACK_DAYS } from './watchlist';
 
@@ -27,6 +29,7 @@ export interface IngestSummary {
   macroObservations: number;
   quotes: number;
   quoteCacheTtlSeconds: number;
+  snapshotKey: string | null;
 }
 
 export async function runIngest(): Promise<IngestSummary> {
@@ -54,31 +57,52 @@ export async function runIngest(): Promise<IngestSummary> {
 
     // 3. Fundamentales (Financial Modeling Prep)
     const fmpClient = createFmpClient(fmpConfig);
-    let fundamentalsCount = 0;
+    const fundamentals: { symbol: string; profile: CompanyProfile }[] = [];
     for (const symbol of WATCHLIST) {
       const profile = await getCompanyProfile(fmpClient, symbol);
       if (profile) {
         await saveFundamentalsSnapshot(pool, symbol, 'fmp', profile);
-        fundamentalsCount++;
+        fundamentals.push({ symbol, profile });
       }
     }
 
     // 4. Series macro (FRED)
     const fredClient = createFredClient(fredConfig);
-    let macroCount = 0;
+    const macroObservations: MacroObservation[] = [];
     for (const seriesId of MACRO_SERIES) {
       const observations = await getSeriesObservations(fredClient, seriesId, 6);
       await saveMacroObservations(pool, observations);
-      macroCount += observations.length;
+      macroObservations.push(...observations);
     }
 
     // 5. Quotes en vivo (Finnhub) cacheados en Redis para consumo rápido del bot
     const finnhubClient = createFinnhubClient(finnhubConfig);
-    let quoteCount = 0;
+    const quotes: { symbol: string; quote: Quote }[] = [];
     for (const symbol of WATCHLIST) {
       const quote = await getQuote(finnhubClient, symbol);
       await redis.set(`quote:${symbol}`, JSON.stringify(quote), 'EX', QUOTE_CACHE_TTL_SECONDS);
-      quoteCount++;
+      quotes.push({ symbol, quote });
+    }
+
+    // 6. Snapshot crudo de la corrida en MinIO (Fase 3) - no debe romper la ingesta si falla.
+    let snapshotKey: string | null = null;
+    try {
+      const minioConfig = loadMinioConfig();
+      const minioClient = createMinioClient(minioConfig);
+      const key = `ingest/${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      const snapshot = await putJsonSnapshot(minioClient, minioConfig, key, {
+        generatedAt: new Date().toISOString(),
+        watchlist: WATCHLIST,
+        macroSeries: MACRO_SERIES,
+        bars,
+        news,
+        fundamentals,
+        macroObservations,
+        quotes,
+      });
+      snapshotKey = snapshot.key;
+    } catch (error) {
+      console.error('No se pudo guardar el snapshot de ingesta en MinIO:', error);
     }
 
     return {
@@ -86,10 +110,11 @@ export async function runIngest(): Promise<IngestSummary> {
       macroSeries: MACRO_SERIES,
       bars: bars.length,
       news: news.length,
-      fundamentals: fundamentalsCount,
-      macroObservations: macroCount,
-      quotes: quoteCount,
+      fundamentals: fundamentals.length,
+      macroObservations: macroObservations.length,
+      quotes: quotes.length,
       quoteCacheTtlSeconds: QUOTE_CACHE_TTL_SECONDS,
+      snapshotKey,
     };
   } finally {
     await redis.quit();

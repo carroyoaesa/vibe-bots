@@ -154,6 +154,25 @@ Cada orden ejecutada (o error) se registra en `trading_orders`, vinculada a la s
 
 > ⚠️ Tanto `npm run trade` como el botón del dashboard y `POST /api/trading/run` colocan órdenes reales (con dinero simulado) en la cuenta **paper** de Alpaca. No hay modo "solo simulación" adicional en esta fase: el "paper" de Alpaca ya es el entorno de prueba.
 
+## Snapshots de ingesta y trading en MinIO - Fase 3
+
+`src/services/storage.ts` expone, además del health-check, helpers para guardar y leer snapshots JSON en el bucket configurado (`MINIO_BUCKET`, por defecto `vibe-bots`):
+
+- `putJsonSnapshot(client, config, key, data)` - sube `data` como JSON (crea el bucket si no existe).
+- `listSnapshots(client, config, prefix)` - lista objetos bajo `prefix`, ordenados por fecha descendente.
+- `getSnapshotStream(client, config, key)` - devuelve un stream legible con el contenido de un objeto.
+
+Tanto `runIngest()` (`src/ingestRunner.ts`) como `runTradingCycle()` (`src/tradingRunner.ts`) suben, al final de cada corrida, un snapshot JSON con los datos crudos de esa corrida:
+
+- **`ingest/<timestamp>.json`** (cada `npm run ingest` / `POST /api/ingest`): `{ generatedAt, watchlist, macroSeries, bars, news, fundamentals, macroObservations, quotes }` - el detalle completo de lo obtenido de Alpaca/FMP/FRED/Finnhub en esa corrida (no solo los conteos del resumen).
+- **`trading/<timestamp>.json`** (cada `npm run trade` / `POST /api/trading/run`): `{ generatedAt, account, signals, actions }` - estado de cuenta, señales calculadas y acciones tomadas (o no) por símbolo.
+
+`<timestamp>` es `new Date().toISOString().replace(/[:.]/g, '-')` (p.ej. `2026-06-14T12-36-20-486Z.json`).
+
+La subida a MinIO es **best-effort**: si falla (p.ej. MinIO caído), se loguea el error y `snapshotKey` queda en `null` en el resultado (`IngestSummary.snapshotKey` / `TradingCycleResult.snapshotKey`), pero la ingesta o el ciclo de trading continúan normalmente (no se pierde lo ya guardado en PostgreSQL/Redis ni se interrumpe la colocación de órdenes).
+
+> ℹ️ El backup periódico de PostgreSQL a MinIO (`pg_dump`) queda **fuera de esta fase** - requiere su propia decisión de scheduling (cron) y se evaluará por separado.
+
 ## Dashboard web (`npm run web`) - Fase 1.5
 
 `src/server.ts` levanta un servidor Express (puerto `WEB_PORT`, por defecto `4000`) que sirve un frontend estático (`public/`) y una API mínima:
@@ -165,6 +184,8 @@ Cada orden ejecutada (o error) se registra en `trading_orders`, vinculada a la s
 - `GET /api/trading/status` - cuenta, posiciones, señales (frescas, ETF + Acciones) y órdenes recientes (Fase 2, ver más arriba).
 - `GET /api/trading/chart/:symbol` - serie de los últimos `CHART_LOOKBACK_BARS` (90) cierres + SMA10/SMA30/RSI para un símbolo (`buildChartSeries` en `src/strategy/chart.ts`, datos de `getRecentBars`).
 - `POST /api/trading/run` - ejecuta `src/tradingRunner.ts` (misma lógica que `npm run trade`); **coloca/cierra órdenes reales en la cuenta paper de Alpaca**.
+- `GET /api/snapshots` - lista los snapshots más recientes (ingesta + trading, hasta 30) guardados en MinIO, con `{ key, size, lastModified, type: 'ingest' | 'trading' }` (Fase 3, ver más arriba).
+- `GET /api/snapshots/download?key=...` - descarga el contenido JSON de un snapshot. Valida que `key` tenga el formato `(ingest|trading)/<...>.json` para evitar acceso a otros objetos del bucket.
 
 ### Sección "Trading (Fase 2 - paper)" del frontend
 
@@ -179,6 +200,10 @@ El panel se divide en dos sub-secciones, **ETFs** y **Acciones**, cada una con:
   - Si no hay datos históricos todavía, muestra un mensaje en vez del gráfico.
 
 Ambas sub-secciones (tabla y gráficos) se ordenan de mayor a menor según `attractivenessScore(signal)` (`public/app.js`): puntaje compuesto que prioriza señal BUY > HOLD > SELL, y dentro de cada una favorece momentum positivo, RSI cercano a neutral (no sobrecomprado/sobrevendido) y tendencia alcista (SMA10 > SMA30).
+
+### Sección "Snapshots (MinIO)" del frontend
+
+Tabla (`renderSnapshots`) con columnas Tipo, Fecha, Tamaño y un enlace de descarga, poblada desde `GET /api/snapshots` (hasta 30 snapshots, ingesta + trading mezclados y ordenados por fecha). Se refresca con el botón "🔄 Actualizar" y automáticamente después de ejecutar una ingesta o un ciclo de trading desde el dashboard.
 
 El resto del frontend (`public/index.html`, `public/app.js`, `public/styles.css`):
 
@@ -229,5 +254,5 @@ Estado de las fases:
 2. ✅ uso de Redis para caché de quotes (Finnhub) - pendiente extender a estado/colas de órdenes.
 3. ✅ **Dashboard web** (Fase 1.5, `src/server.ts` + `public/`): health checks, ingesta manual, panel de trading (ETF/Acciones, ranking por atractivo, gráficos con bandas de entrada/salida) y panel de Grafana embebido (Public Dashboard, ⏳ sin verificación visual completa).
 4. ✅ **Estrategia + ejecución automática de órdenes vía Alpaca** (Fase 2, `src/strategy/`, `src/tradingRunner.ts`, `npm run trade`): señales SMA10/SMA30 + RSI + momentum, precio estimado de entrada/salida, perfil de riesgo moderado y bracket orders **límite** en paper. Persistencia en `trading_signals`/`trading_orders`, expuesto en `/api/trading/*`, dashboard web y Grafana.
-5. ⬜ almacenamiento de archivos y snapshots en MinIO (aún solo health-check).
+5. ✅ **Snapshots de ingesta/trading en MinIO** (Fase 3, `src/services/storage.ts`): cada `npm run ingest`/`npm run trade` sube un snapshot JSON crudo (`ingest/<ts>.json` / `trading/<ts>.json`), listado y descargable desde el dashboard (`GET /api/snapshots`, `GET /api/snapshots/download`). Subida best-effort (no rompe la corrida si MinIO falla). Backup periódico de PostgreSQL a MinIO queda diferido (decisión de scheduling separada).
 6. ⬜ backtesting y capa de IA (Claude) combinando indicadores técnicos + fundamentales (FMP) + sentimiento (noticias/Alpha Vantage) + contexto macro (FRED), visualizado en Grafana.

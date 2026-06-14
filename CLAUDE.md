@@ -6,7 +6,7 @@ Este archivo se carga automáticamente en cada sesión. Objetivo: que tras una a
 
 Bot de trading en TypeScript/Node.js (CommonJS, ES2020, `strict: true`) corriendo en una instancia LXD con servicios **nativos** (no Docker): PostgreSQL, Redis, MinIO, Grafana, todos vía systemd con autostart. Directorio de trabajo: `/root/bots/vibe-bots`. Repo: `github.com/carroyoaesa/vibe-bots`, branch `main`.
 
-Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución paper ✅), 3 (MinIO ⬜), 4 (backtesting/IA ⬜).
+Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución paper ✅), 3 (snapshots MinIO ✅), 4 (backtesting/IA ⬜).
 
 ## Reglas operativas críticas (NO romper sin pedir confirmación explícita)
 
@@ -54,6 +54,13 @@ Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución pape
 ## `/api/trading/status` (importante para no romper)
 
 Recalcula señales **frescas** (no cacheadas) para los 28 símbolos vía `getCloses` + `computeSignal`, etiquetando cada una con `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`. `getLatestSignals` (`tradingStore.ts`) existe pero ya no se usa desde aquí (queda como helper histórico).
+
+## Snapshots en MinIO (Fase 3)
+
+- `src/services/storage.ts`: además del health-check, expone `putJsonSnapshot`, `listSnapshots`, `getSnapshotStream`.
+- `runIngest()` y `runTradingCycle()` suben, al final de cada corrida, un snapshot JSON **best-effort** (no rompe la corrida si MinIO falla, ver `snapshotKey: string | null` en `IngestSummary`/`TradingCycleResult`): `ingest/<ts>.json` (`{generatedAt, watchlist, macroSeries, bars, news, fundamentals, macroObservations, quotes}`) y `trading/<ts>.json` (`{generatedAt, account, signals, actions}`). `<ts> = new Date().toISOString().replace(/[:.]/g, '-')`.
+- `server.ts` expone `GET /api/snapshots` (lista hasta 30, ingesta+trading mezclados) y `GET /api/snapshots/download?key=...` (valida `^(ingest|trading)/[A-Za-z0-9_\-:.]+\.json$` contra path traversal). Sección "Snapshots (MinIO)" en `public/` (tabla con descarga).
+- Backup de PostgreSQL a MinIO (`pg_dump`) queda diferido - requiere su propia decisión de scheduling (cron), fuera de esta fase.
 
 ## Comandos
 

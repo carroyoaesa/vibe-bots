@@ -110,6 +110,27 @@
 
     <section class="card">
       <div class="section-header">
+        <h2>Snapshots (MinIO)</h2>
+        <div class="section-actions">
+          <span id="snapshots-updated" class="muted"></span>
+          <button id="refresh-snapshots">🔄 Actualizar</button>
+        </div>
+      </div>
+      <p class="muted">
+        Copias JSON de cada corrida de ingesta y ciclo de trading, guardadas en MinIO.
+      </p>
+      <div class="table-wrap">
+        <table id="snapshots-table">
+          <thead>
+            <tr><th>Tipo</th><th>Fecha</th><th>Tamaño</th><th>Descargar</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
         <h2>Grafana</h2>
       </div>
       <div id="grafana-container">

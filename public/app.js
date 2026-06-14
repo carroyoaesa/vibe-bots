@@ -15,6 +15,10 @@ const ordersTableBody = document.querySelector('#orders-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
 const tradeResult = document.getElementById('trade-result');
 
+const snapshotsTableBody = document.querySelector('#snapshots-table tbody');
+const refreshSnapshotsBtn = document.getElementById('refresh-snapshots');
+const snapshotsUpdated = document.getElementById('snapshots-updated');
+
 const chartInstances = {};
 
 function renderHealth(data) {
@@ -76,6 +80,7 @@ async function runIngest() {
     ingestResult.textContent = JSON.stringify(data, null, 2);
     if (data.ok) {
       await loadHealth();
+      await loadSnapshots();
     }
   } catch (error) {
     ingestResult.textContent = `Error: ${error}`;
@@ -385,11 +390,56 @@ async function runTradingCycle() {
     tradeResult.textContent = JSON.stringify(data, null, 2);
     if (data.ok) {
       await loadTradingStatus();
+      await loadSnapshots();
     }
   } catch (error) {
     tradeResult.textContent = `Error: ${error}`;
   } finally {
     runTradeBtn.disabled = false;
+  }
+}
+
+function fmtBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderSnapshots(snapshots) {
+  snapshotsTableBody.innerHTML = '';
+  if (snapshots.length === 0) {
+    snapshotsTableBody.innerHTML = '<tr><td colspan="4" class="muted">Sin snapshots todavía. Ejecutá una ingesta o un ciclo de trading.</td></tr>';
+    return;
+  }
+
+  snapshots.forEach((snapshot) => {
+    const tr = document.createElement('tr');
+    const typeLabel = snapshot.type === 'ingest' ? 'Ingesta' : 'Trading';
+    tr.innerHTML = `
+      <td>${typeLabel}</td>
+      <td>${new Date(snapshot.lastModified).toLocaleString()}</td>
+      <td>${fmtBytes(snapshot.size)}</td>
+      <td><a href="/api/snapshots/download?key=${encodeURIComponent(snapshot.key)}">⬇️ Descargar</a></td>
+    `;
+    snapshotsTableBody.appendChild(tr);
+  });
+}
+
+async function loadSnapshots() {
+  refreshSnapshotsBtn.disabled = true;
+  try {
+    const res = await fetch('/api/snapshots');
+    const data = await res.json();
+    if (data.ok) {
+      renderSnapshots(data.snapshots);
+      snapshotsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
+    } else {
+      snapshotsTableBody.innerHTML = `<tr><td colspan="4" class="muted">Error: ${data.error}</td></tr>`;
+    }
+  } catch (error) {
+    snapshotsTableBody.innerHTML = `<tr><td colspan="4" class="muted">Error al cargar snapshots: ${error}</td></tr>`;
+  } finally {
+    refreshSnapshotsBtn.disabled = false;
   }
 }
 
@@ -416,9 +466,11 @@ async function loadGrafana() {
 refreshHealthBtn.addEventListener('click', loadHealth);
 runIngestBtn.addEventListener('click', runIngest);
 runTradeBtn.addEventListener('click', runTradingCycle);
+refreshSnapshotsBtn.addEventListener('click', loadSnapshots);
 
 loadHealth();
 loadGrafana();
 loadTradingStatus();
+loadSnapshots();
 setInterval(loadHealth, 60000);
 setInterval(loadTradingStatus, 60000);

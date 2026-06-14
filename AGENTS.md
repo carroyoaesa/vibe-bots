@@ -40,7 +40,7 @@ Cada cliente tiene una función `verifyX()` que se ejecuta en `npm run dev` (`sr
 
 - `src/diagnostics.ts`: lista compartida de health checks (`DIAGNOSTIC_CHECKS` + `runDiagnostics()`). Es la fuente única de verdad para `npm run dev` (`src/index.ts`) y para `GET /api/health`. Si se agrega una nueva integración, su `verifyX()` debe registrarse aquí, no directamente en `index.ts`.
 - `src/ingestRunner.ts`: lógica de `runIngest()` (antes en `src/ingest.ts`). `src/ingest.ts` es ahora un wrapper CLI delgado; `POST /api/ingest` llama a la misma función.
-- `src/server.ts`: servidor Express (`npm run web`, puerto `WEB_PORT`/4000) que sirve `public/` (frontend estático) y expone `/api/health`, `/api/config`, `/api/ingest`, `/api/trading/status`, `/api/trading/chart/:symbol`, `/api/trading/run`.
+- `src/server.ts`: servidor Express (`npm run web`, puerto `WEB_PORT`/4000) que sirve `public/` (frontend estático) y expone `/api/health`, `/api/config`, `/api/ingest`, `/api/trading/status`, `/api/trading/chart/:symbol`, `/api/trading/run`, `/api/snapshots`, `/api/snapshots/download`.
 - `public/`: frontend estático (HTML/CSS/JS sin build step, Chart.js v4 vía CDN) - tarjetas de salud, botón de ingesta, sección de trading (sub-secciones ETFs/Acciones con tablas + gráficos por símbolo ordenados por `attractivenessScore`) e iframe de Grafana.
 - El iframe de Grafana usa `GRAFANA_PUBLIC_URL` (Public Dashboard de Grafana, ver README). No depende de cookies de sesión de Grafana.
 - Cambios en `/etc/grafana/grafana.ini` (p.ej. `allow_embedding`) son a nivel de sistema y NO están en este repo. Si se edita ese archivo, restaurar `chown root:grafana` y `chmod 640` después, o `grafana-server` no podrá leerlo.
@@ -59,3 +59,10 @@ Cada cliente tiene una función `verifyX()` que se ejecuta en `npm run dev` (`sr
 - `src/tradingRunner.ts`: `runTradingCycle()` - orquesta señales + riesgo + ejecución para todo el watchlist. Es la lógica compartida entre `src/trade.ts` (CLI, `npm run trade`) y `POST /api/trading/run`. En BUY, coloca la bracket order límite al `estimatedEntryPrice` (con fallback a `signal.price` si es `null`), con TP/SL relativos a ese precio.
 - ⚠️ **`runTradingCycle()` coloca/cierra órdenes reales (bracket orders) en la cuenta PAPER de Alpaca.** No hay un modo "dry-run" separado en esta fase - el entorno paper de Alpaca ya cumple ese rol. Cualquier cambio a `tradingRunner.ts`, `strategy/config.ts` (perfil de riesgo) o `strategy/signals.ts` debe tenerse en cuenta como un cambio de comportamiento de trading real (en paper).
 - `grafana/dashboards/vibe-trading.json` (uid `vibe-bots-trading`): historial de señales, precio/RSI por símbolo y órdenes recientes. Se publica igual que `vibe-overview.json` (`POST /api/dashboards/db` con `admin:admin`). Los paneles `timeseries` tienen `fieldConfig.defaults.custom` (v2) pero la verificación visual queda pendiente (diferido a pedido del usuario).
+
+## Snapshots en MinIO (Fase 3)
+
+- `src/services/storage.ts`: además de `verifyStorage` (health-check), expone `putJsonSnapshot`, `listSnapshots`, `getSnapshotStream` para guardar/leer JSON en el bucket configurado (`MINIO_BUCKET`).
+- `runIngest()` (`src/ingestRunner.ts`) y `runTradingCycle()` (`src/tradingRunner.ts`) suben, al final de cada corrida, un snapshot JSON crudo a `ingest/<ts>.json` / `trading/<ts>.json` (`<ts> = new Date().toISOString().replace(/[:.]/g, '-')`). La subida es best-effort: si MinIO falla, se loguea el error y `snapshotKey` queda `null`, sin afectar el resto de la corrida (Postgres/Redis/órdenes).
+- `server.ts` expone `GET /api/snapshots` (lista hasta 30, ingesta+trading) y `GET /api/snapshots/download?key=...` (valida `^(ingest|trading)/[A-Za-z0-9_\-:.]+\.json$`). El dashboard (`public/`) tiene una sección "Snapshots (MinIO)" con tabla y enlaces de descarga.
+- Backup periódico de PostgreSQL a MinIO (`pg_dump`) queda diferido a una fase/decisión separada (requiere scheduling propio).

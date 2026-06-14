@@ -1,5 +1,6 @@
-import { loadAlpacaConfig, loadPostgresConfig } from './config';
+import { loadAlpacaConfig, loadPostgresConfig, loadMinioConfig } from './config';
 import { createPostgresPool } from './services/db';
+import { createMinioClient, putJsonSnapshot } from './services/storage';
 import { getCloses } from './services/marketStore';
 import {
   createAlpacaClient,
@@ -30,6 +31,7 @@ export interface TradingCycleResult {
   account: AlpacaAccountSummary;
   signals: SignalResult[];
   actions: TradingAction[];
+  snapshotKey: string | null;
 }
 
 export async function runTradingCycle(): Promise<TradingCycleResult> {
@@ -148,7 +150,24 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       }
     }
 
-    return { account, signals, actions };
+    // Snapshot crudo del ciclo en MinIO (Fase 3) - no debe romper el ciclo de trading si falla.
+    let snapshotKey: string | null = null;
+    try {
+      const minioConfig = loadMinioConfig();
+      const minioClient = createMinioClient(minioConfig);
+      const key = `trading/${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      const snapshot = await putJsonSnapshot(minioClient, minioConfig, key, {
+        generatedAt: new Date().toISOString(),
+        account,
+        signals,
+        actions,
+      });
+      snapshotKey = snapshot.key;
+    } catch (error) {
+      console.error('No se pudo guardar el snapshot del ciclo de trading en MinIO:', error);
+    }
+
+    return { account, signals, actions, snapshotKey };
   } finally {
     await pool.end();
   }
