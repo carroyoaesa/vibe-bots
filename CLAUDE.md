@@ -21,7 +21,7 @@ Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución pape
 
 - `src/index.ts`, `src/check-runner.ts`, `src/diagnostics.ts` - 9 health checks (`npm run dev`, `GET /api/health`).
 - `src/ingest.ts`, `src/ingestRunner.ts` - ingesta Fase 1 (`npm run ingest`, `POST /api/ingest`).
-- `src/watchlist.ts` - **fuente única de verdad**: `WATCHLIST` (28 símbolos), `ETF_SYMBOLS` (15, subconjunto de WATCHLIST), `MACRO_SERIES`, `BARS_LOOKBACK_DAYS=220`.
+- `src/watchlist.ts` - **fuente única de verdad**: `WATCHLIST` (22 símbolos), `ETF_SYMBOLS` (13, subconjunto de WATCHLIST), `MACRO_SERIES`, `BARS_LOOKBACK_DAYS=220`.
 - `src/strategy/` - lógica pura, sin I/O:
   - `indicators.ts`: `sma`, `rsi`, `momentum`, `smaSeries`, `rsiSeries`, `estimateEntryPrice`.
   - `signals.ts`: `computeSignal(symbol, closes) -> SignalResult`.
@@ -34,11 +34,12 @@ Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución pape
 - `grafana/dashboards/*.json` - dashboards provisionados vía API (`admin:admin`).
 - `scripts/` - `start-web.sh`, `stop-web.sh`, `status.sh`.
 
-## Watchlist (28 símbolos, `src/watchlist.ts`)
+## Watchlist (22 símbolos, `src/watchlist.ts`)
 
-- **ETFs (15)**: `SPY, QQQ, SCHE, SCHF, XLP, XLU, XMMO, VUG, DBEZ, PPA, SCHG, SCHD, SPMO, QQQM, SOXQ`.
-- **Acciones (13)**: `AAPL, MSFT, NVDA, NECB, REG, TOL, AMZN, TSM, AVGO, GOOGL, MU, AGM, MS`.
+- **ETFs (13)**: `SPY, QQQ, SCHE, SCHF, XLP, XLU, XMMO, VUG, SCHG, SCHD, SPMO, QQQM, SOXQ`.
+- **Acciones (9)**: `AAPL, MSFT, NVDA, REG, TOL, AMZN, TSM, GOOGL, MS`.
 - El dashboard divide "Trading (Fase 2 - paper)" en sub-secciones ETFs/Acciones, ordenadas por `attractivenessScore` (en `public/app.js`).
+- Reducido desde 28 símbolos (2026-06-14) tras un análisis de backtests/correlación/liquidez: se quitaron `NECB, DBEZ, PPA, AVGO, MU, AGM` por baja probabilidad de retorno con la estrategia actual (sin señales, micro-caps ilíquidos, o volatilidad diaria que supera el SL fijo del 3%).
 
 ## Modelo de precios de la estrategia (estado actual)
 
@@ -53,7 +54,7 @@ Fases: 1 (ingesta ✅), 1.5 (dashboard web ✅), 2 (estrategia + ejecución pape
 
 ## `/api/trading/status` (importante para no romper)
 
-Recalcula señales **frescas** (no cacheadas) para los 28 símbolos vía `getCloses` + `computeSignal`, etiquetando cada una con `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`. `getLatestSignals` (`tradingStore.ts`) existe pero ya no se usa desde aquí (queda como helper histórico).
+Recalcula señales **frescas** (no cacheadas) para los 22 símbolos vía `getCloses` + `computeSignal`, etiquetando cada una con `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`. `getLatestSignals` (`tradingStore.ts`) existe pero ya no se usa desde aquí (queda como helper histórico).
 
 ## Snapshots en MinIO (Fase 3)
 

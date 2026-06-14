@@ -27,7 +27,9 @@ export interface DailyBar {
 
 /**
  * Bars diarias por símbolo. El plan free de Alpaca solo da acceso al feed IEX,
- * por eso se fija explícitamente feed=iex.
+ * por eso se fija explícitamente feed=iex. `adjustment=split` evita discontinuidades
+ * de precio (y por lo tanto señales falsas en SMA/RSI/momentum) cuando un símbolo
+ * tiene un split dentro de la ventana de lookback.
  */
 export async function getDailyBars(client: AxiosInstance, symbols: string[], days: number): Promise<DailyBar[]> {
   const start = new Date();
@@ -42,6 +44,7 @@ export async function getDailyBars(client: AxiosInstance, symbols: string[], day
       timeframe: '1Day',
       start: start.toISOString().slice(0, 10),
       feed: 'iex',
+      adjustment: 'split',
       limit: 10000,
     },
   });

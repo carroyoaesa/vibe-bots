@@ -101,7 +101,7 @@ GRAFANA_PUBLIC_URL=
 
 `src/ingest.ts` corre la ingesta inicial de datos de mercado para el watchlist (`src/watchlist.ts`) y la guarda en PostgreSQL (`src/services/marketStore.ts` crea las tablas si no existen):
 
-- **Watchlist** (28 símbolos, `WATCHLIST` en `src/watchlist.ts`): 15 ETFs (`ETF_SYMBOLS`: `SPY, QQQ, SCHE, SCHF, XLP, XLU, XMMO, VUG, DBEZ, PPA, SCHG, SCHD, SPMO, QQQM, SOXQ`) + 13 acciones (`AAPL, MSFT, NVDA, NECB, REG, TOL, AMZN, TSM, AVGO, GOOGL, MU, AGM, MS`). `ETF_SYMBOLS` es el subconjunto de `WATCHLIST` que el dashboard clasifica como "ETF"; el resto se clasifica como "Acciones".
+- **Watchlist** (22 símbolos, `WATCHLIST` en `src/watchlist.ts`): 13 ETFs (`ETF_SYMBOLS`: `SPY, QQQ, SCHE, SCHF, XLP, XLU, XMMO, VUG, SCHG, SCHD, SPMO, QQQM, SOXQ`) + 9 acciones (`AAPL, MSFT, NVDA, REG, TOL, AMZN, TSM, GOOGL, MS`). `ETF_SYMBOLS` es el subconjunto de `WATCHLIST` que el dashboard clasifica como "ETF"; el resto se clasifica como "Acciones". Lista reducida desde los 28 símbolos originales (ver historial de commits) tras un análisis de backtests/correlación/liquidez, quitando `NECB, DBEZ, PPA, AVGO, MU, AGM` por baja probabilidad de retorno con la estrategia actual (sin señales, micro-caps ilíquidos, o volatilidad diaria que supera el SL fijo del 3%).
 - **`market_bars`**: bars diarias (`BARS_LOOKBACK_DAYS` = 220 días calendario, ~150 sesiones, suficiente para SMA30+RSI14 con margen) desde Alpaca Market Data API (feed IEX).
 - **`news_items`**: noticias del watchlist desde Alpaca News API (Benzinga).
 - **`fundamentals_snapshots`**: perfil/fundamentales por símbolo desde FMP (`JSONB`, un snapshot por corrida).
@@ -111,7 +111,7 @@ Además cachea en Redis el último quote de Finnhub por símbolo (`quote:<SYMBOL
 
 > ⚠️ Alpha Vantage tiene un free tier muy limitado (~25 requests/día). Su cliente (`src/services/alphaVantage.ts`) está disponible y se prueba en el diagnóstico, pero **no** se usa en la ingesta recurrente para no agotar la cuota.
 
-> ℹ️ El endpoint `/v2/stocks/bars` de Alpaca aplica el parámetro `limit` al **total de barras de la respuesta** (suma de todos los símbolos), no por símbolo. `getDailyBars` (`src/services/marketData.ts`) usa `limit: 10000` para evitar que, con 28 símbolos x ~150 sesiones (~4200 barras), el watchlist se trunque alfabéticamente y los últimos símbolos queden sin histórico suficiente para SMA30.
+> ℹ️ El endpoint `/v2/stocks/bars` de Alpaca aplica el parámetro `limit` al **total de barras de la respuesta** (suma de todos los símbolos), no por símbolo. `getDailyBars` (`src/services/marketData.ts`) usa `limit: 10000` para evitar que, con 22 símbolos x ~150 sesiones (~3300 barras), el watchlist se trunque alfabéticamente y los últimos símbolos queden sin histórico suficiente para SMA30. También se pasa `adjustment: 'split'` para evitar discontinuidades de precio (y señales falsas en SMA/RSI/momentum) cuando un símbolo tiene un split dentro de la ventana de lookback.
 
 ## Trading automatizado (`npm run trade`) - Fase 2 (paper)
 
@@ -148,7 +148,7 @@ Cada orden ejecutada (o error) se registra en `trading_orders`, vinculada a la s
 
 ### Exposición vía API/web
 
-- `GET /api/trading/status`: cuenta (equity/cash/buying power), posiciones abiertas, órdenes recientes y **señales recalculadas en el momento** (no cacheadas) para los 28 símbolos del watchlist, cada una etiquetada como `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`.
+- `GET /api/trading/status`: cuenta (equity/cash/buying power), posiciones abiertas, órdenes recientes y **señales recalculadas en el momento** (no cacheadas) para los 22 símbolos del watchlist, cada una etiquetada como `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`.
 - `POST /api/trading/run`: ejecuta `runTradingCycle()` (misma lógica que `npm run trade`) - **coloca/cierra órdenes reales en la cuenta paper**.
 - El frontend (`public/`) tiene una sección "Trading (Fase 2 - paper)" con estas tablas, gráficos por símbolo y un botón "Ejecutar ciclo de trading" que pide confirmación antes de llamar a `POST /api/trading/run`.
 
@@ -250,7 +250,7 @@ Ver también `CLAUDE.md` para un resumen denso pensado para retener contexto ent
 
 Estado de las fases:
 
-1. ✅ **Ingestión de datos en PostgreSQL** (Fase 1, `src/ingest.ts`): bars, noticias, fundamentales y series macro para 28 símbolos (15 ETFs + 13 acciones).
+1. ✅ **Ingestión de datos en PostgreSQL** (Fase 1, `src/ingest.ts`): bars, noticias, fundamentales y series macro para 22 símbolos (13 ETFs + 9 acciones).
 2. ✅ uso de Redis para caché de quotes (Finnhub) - pendiente extender a estado/colas de órdenes.
 3. ✅ **Dashboard web** (Fase 1.5, `src/server.ts` + `public/`): health checks, ingesta manual, panel de trading (ETF/Acciones, ranking por atractivo, gráficos con bandas de entrada/salida) y panel de Grafana embebido (Public Dashboard, ⏳ sin verificación visual completa).
 4. ✅ **Estrategia + ejecución automática de órdenes vía Alpaca** (Fase 2, `src/strategy/`, `src/tradingRunner.ts`, `npm run trade`): señales SMA10/SMA30 + RSI + momentum, precio estimado de entrada/salida, perfil de riesgo moderado y bracket orders **límite** en paper. Persistencia en `trading_signals`/`trading_orders`, expuesto en `/api/trading/*`, dashboard web y Grafana.

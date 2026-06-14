@@ -89,7 +89,11 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
               });
             } else {
               // Orden límite al precio estimado de entrada (no a mercado), con TP/SL relativos a ese precio.
-              const entryPrice = signal.estimatedEntryPrice ?? signal.price;
+              // Si el precio actual ya está por debajo del estimado, conviene tomar el menor de los dos
+              // (mejor precio de entrada para el comprador) en lugar de esperar a que suba al estimado.
+              const entryPrice = signal.estimatedEntryPrice !== null
+                ? Math.min(signal.estimatedEntryPrice, signal.price)
+                : signal.price;
               const takeProfitPrice = entryPrice * (1 + RISK_PROFILE.takeProfitPct);
               const stopLossPrice = entryPrice * (1 - RISK_PROFILE.stopLossPct);
 
