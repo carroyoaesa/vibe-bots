@@ -138,6 +138,69 @@ button:disabled {
   word-break: break-word;
 }
 
+h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.95rem;
+  color: #c7c9cc;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #2a2e35;
+  white-space: nowrap;
+}
+
+th {
+  color: #9aa0a6;
+  font-weight: 600;
+}
+
+td.muted {
+  white-space: normal;
+}
+
+.signal-buy, .signal-sell, .signal-hold {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.8rem;
+}
+
+.signal-buy {
+  background: rgba(46, 204, 113, 0.15);
+  color: #2ecc71;
+}
+
+.signal-sell {
+  background: rgba(231, 76, 60, 0.15);
+  color: #e74c3c;
+}
+
+.signal-hold {
+  background: rgba(154, 160, 166, 0.15);
+  color: #9aa0a6;
+}
+
+.pl-positive {
+  color: #2ecc71;
+}
+
+.pl-negative {
+  color: #e74c3c;
+}
+
 .result {
   background: #0f1115;
   border: 1px solid #2a2e35;

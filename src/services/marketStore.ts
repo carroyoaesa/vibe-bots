@@ -99,6 +99,19 @@ export async function saveFundamentalsSnapshot(
   );
 }
 
+/** Cierres diarios de un símbolo, en orden ascendente por fecha (los más recientes al final). */
+export async function getCloses(pool: Pool, symbol: string, limit: number): Promise<number[]> {
+  const result = await pool.query<{ close: string }>(
+    `SELECT close FROM market_bars
+     WHERE symbol = $1 AND timeframe = '1Day'
+     ORDER BY ts DESC
+     LIMIT $2`,
+    [symbol, limit]
+  );
+
+  return result.rows.map((row) => Number(row.close)).reverse();
+}
+
 export async function saveMacroObservations(pool: Pool, observations: MacroObservation[]): Promise<void> {
   for (const obs of observations) {
     await pool.query(

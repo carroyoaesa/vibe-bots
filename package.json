@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "ingest": "ts-node src/ingest.ts",
+    "trade": "ts-node src/trade.ts",
     "web": "ts-node src/server.ts",
     "web:start": "./scripts/start-web.sh",
     "web:stop": "./scripts/stop-web.sh",

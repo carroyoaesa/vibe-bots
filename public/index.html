@@ -39,6 +39,52 @@
 
     <section class="card">
       <div class="section-header">
+        <h2>Trading (Fase 2 - paper)</h2>
+        <button id="run-trade">🤖 Ejecutar ciclo de trading</button>
+      </div>
+      <p class="muted">
+        Calcula señales (SMA10/SMA30 + RSI + momentum) y, según el perfil de riesgo moderado
+        (10% del equity por posición, stop -3% / take-profit +6%, máx. 5 posiciones), abre o
+        cierra posiciones con bracket orders en la cuenta <strong>paper</strong> de Alpaca.
+      </p>
+
+      <div id="trading-account" class="muted"></div>
+
+      <h3>Señales actuales</h3>
+      <div class="table-wrap">
+        <table id="signals-table">
+          <thead>
+            <tr><th>Símbolo</th><th>Precio</th><th>SMA10</th><th>SMA30</th><th>RSI</th><th>Mom.</th><th>Señal</th><th>Motivo</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>Posiciones abiertas</h3>
+      <div class="table-wrap">
+        <table id="positions-table">
+          <thead>
+            <tr><th>Símbolo</th><th>Cantidad</th><th>Precio entrada</th><th>Precio actual</th><th>Valor</th><th>P/L no realizado</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>Órdenes recientes</h3>
+      <div class="table-wrap">
+        <table id="orders-table">
+          <thead>
+            <tr><th>Fecha</th><th>Símbolo</th><th>Lado</th><th>Cantidad</th><th>Tipo</th><th>TP</th><th>SL</th><th>Estado</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <pre id="trade-result" class="result"></pre>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
         <h2>Grafana</h2>
       </div>
       <div id="grafana-container">

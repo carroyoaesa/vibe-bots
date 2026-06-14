@@ -13,10 +13,9 @@ import { createFredClient, getSeriesObservations } from './services/fred';
 import { createPostgresPool } from './services/db';
 import { createRedisClient } from './services/cache';
 import { setupIngestSchema, saveDailyBars, saveNews, saveFundamentalsSnapshot, saveMacroObservations } from './services/marketStore';
+import { WATCHLIST, MACRO_SERIES, BARS_LOOKBACK_DAYS } from './watchlist';
 
-export const WATCHLIST = ['AAPL', 'MSFT', 'SPY', 'QQQ', 'NVDA'];
-export const MACRO_SERIES = ['FEDFUNDS', 'CPIAUCSL', 'UNRATE'];
-export const BARS_LOOKBACK_DAYS = 30;
+export { WATCHLIST, MACRO_SERIES, BARS_LOOKBACK_DAYS };
 export const QUOTE_CACHE_TTL_SECONDS = 300;
 
 export interface IngestSummary {

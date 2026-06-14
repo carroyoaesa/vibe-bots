@@ -1,0 +1,146 @@
+{
+  "title": "Vibe Bots - Trading (Fase 2)",
+  "uid": "vibe-bots-trading",
+  "tags": ["vibe-bots", "trading"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Historial de señales (SMA10/SMA30 + RSI + momentum)",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] },
+          { "matcher": { "id": "byName", "options": "sma_fast" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] },
+          { "matcher": { "id": "byName", "options": "sma_slow" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] },
+          { "matcher": { "id": "byName", "options": "momentum" }, "properties": [{ "id": "unit", "value": "percent" }] },
+          {
+            "matcher": { "id": "byName", "options": "signal" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "BUY": { "color": "green", "index": 0 },
+                      "SELL": { "color": "red", "index": 1 },
+                      "HOLD": { "color": "text", "index": 2 }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "table",
+          "rawSql": "SELECT ts AS \"time\", symbol, price, sma_fast, sma_slow, rsi, momentum, signal, reason FROM trading_signals ORDER BY ts DESC LIMIT 50",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Precio en señales - watchlist",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, price AS value, symbol AS metric FROM trading_signals ORDER BY ts",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "RSI(14) por símbolo",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 30 },
+              { "color": "red", "value": 70 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "time_series",
+          "rawSql": "SELECT ts AS time, rsi AS value, symbol AS metric FROM trading_signals WHERE rsi IS NOT NULL ORDER BY ts",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Órdenes recientes (bracket orders, paper)",
+      "type": "table",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "take_profit_price" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] },
+          { "matcher": { "id": "byName", "options": "stop_loss_price" }, "properties": [{ "id": "unit", "value": "currencyUSD" }] },
+          {
+            "matcher": { "id": "byName", "options": "side" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "buy": { "color": "green", "index": 0 },
+                      "sell": { "color": "red", "index": 1 }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "PDBE7C897F8170CF8" },
+          "format": "table",
+          "rawSql": "SELECT ts AS \"time\", symbol, side, qty, order_type, take_profit_price, stop_loss_price, status, alpaca_order_id FROM trading_orders ORDER BY ts DESC LIMIT 50",
+          "rawQuery": true
+        }
+      ]
+    }
+  ]
+}
