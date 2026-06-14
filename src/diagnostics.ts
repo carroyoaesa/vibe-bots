@@ -7,6 +7,7 @@ import {
   loadFinnhubConfig,
   loadAlphaVantageConfig,
   loadFredConfig,
+  loadAnthropicConfig,
 } from './config';
 import { createAlpacaClient, verifyAlpaca } from './services/alpaca';
 import { createPostgresPool, verifyPostgres } from './services/db';
@@ -17,6 +18,7 @@ import { createFmpClient, verifyFmp } from './services/fmp';
 import { createFinnhubClient, verifyFinnhub } from './services/finnhub';
 import { createAlphaVantageClient, verifyAlphaVantage } from './services/alphaVantage';
 import { createFredClient, verifyFred } from './services/fred';
+import { createAnthropicClient, verifyAnthropic } from './services/claude';
 
 export interface DiagnosticCheck<T = unknown> {
   id: string;
@@ -149,6 +151,17 @@ export const DIAGNOSTIC_CHECKS: DiagnosticCheck<any>[] = [
       const [latest] = observations;
       return [`FEDFUNDS (${latest.date}): ${latest.value}`];
     },
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic (Claude)',
+    emoji: '🧠',
+    run: async () => {
+      const config = loadAnthropicConfig();
+      const client = createAnthropicClient(config);
+      return verifyAnthropic(client, config.model);
+    },
+    summarize: (result) => [`Modelo: ${result.model}`, `Respuesta: ${result.reply}`],
   },
 ];
 

@@ -6,6 +6,8 @@ function describeAction(action: Awaited<ReturnType<typeof runTradingCycle>>['act
       return `🟢 BUY ${action.symbol}: ${action.qty} acciones (TP $${action.takeProfitPrice.toFixed(2)} / SL $${action.stopLossPrice.toFixed(2)}) - orden ${action.alpacaOrderId}`;
     case 'CLOSE_POSITION':
       return `🔴 SELL ${action.symbol}: cierre de ${action.qty} acciones - orden ${action.alpacaOrderId ?? 'n/a'}`;
+    case 'AI_BLOCKED':
+      return `🤖🚫 ${action.symbol}: BUY vetado por IA (${action.reason})`;
     case 'SKIPPED':
       return `⏭️  ${action.symbol}: omitido (${action.reason})`;
     case 'ERROR':

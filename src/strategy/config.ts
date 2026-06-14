@@ -6,13 +6,38 @@ export const STRATEGY_PARAMS = {
   momentumPeriod: 10,
 };
 
-// Perfil de riesgo "moderado" (Fase 2):
+export interface RiskProfile {
+  positionSizePct: number;
+  stopLossPct: number;
+  takeProfitPct: number;
+  maxPositions: number;
+}
+
+// Perfil de riesgo "moderado" (Fase 2, default/semilla de bot_settings - Fase 5):
 // - 10% del equity por posición
 // - stop-loss -3% / take-profit +6% (ratio 2:1) vía bracket orders
 // - máximo 5 posiciones simultáneas (todo el watchlist)
-export const RISK_PROFILE = {
+export const RISK_PROFILE: RiskProfile = {
   positionSizePct: 0.10,
   stopLossPct: 0.03,
   takeProfitPct: 0.06,
   maxPositions: 5,
+};
+
+// Presets de perfil de riesgo (Fase 5) - punto de partida editable desde el dashboard
+// ("Configuración"). El perfil activo en runtime vive en bot_settings, no aquí.
+export const RISK_PROFILE_PRESETS: Record<'conservador' | 'moderado' | 'agresivo', RiskProfile> = {
+  conservador: {
+    positionSizePct: 0.05,
+    stopLossPct: 0.02,
+    takeProfitPct: 0.04,
+    maxPositions: 3,
+  },
+  moderado: RISK_PROFILE,
+  agresivo: {
+    positionSizePct: 0.15,
+    stopLossPct: 0.05,
+    takeProfitPct: 0.10,
+    maxPositions: 8,
+  },
 };

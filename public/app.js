@@ -5,6 +5,16 @@ const runIngestBtn = document.getElementById('run-ingest');
 const ingestResult = document.getElementById('ingest-result');
 const grafanaContainer = document.getElementById('grafana-container');
 
+const riskPresetSelect = document.getElementById('risk-preset');
+const riskPositionSizeInput = document.getElementById('risk-position-size');
+const riskStopLossInput = document.getElementById('risk-stop-loss');
+const riskTakeProfitInput = document.getElementById('risk-take-profit');
+const riskMaxPositionsInput = document.getElementById('risk-max-positions');
+const claudeModelSelect = document.getElementById('claude-model');
+const saveSettingsBtn = document.getElementById('save-settings');
+const settingsResult = document.getElementById('settings-result');
+const settingsUpdated = document.getElementById('settings-updated');
+
 const tradingAccount = document.getElementById('trading-account');
 const signalsTableBodyEtf = document.querySelector('#signals-table-etf tbody');
 const signalsTableBodyStock = document.querySelector('#signals-table-stock tbody');
@@ -18,6 +28,17 @@ const tradeResult = document.getElementById('trade-result');
 const snapshotsTableBody = document.querySelector('#snapshots-table tbody');
 const refreshSnapshotsBtn = document.getElementById('refresh-snapshots');
 const snapshotsUpdated = document.getElementById('snapshots-updated');
+
+const assessmentsTableBody = document.querySelector('#assessments-table tbody');
+const refreshAssessmentsBtn = document.getElementById('refresh-assessments');
+const assessmentsUpdated = document.getElementById('assessments-updated');
+
+const backtestingTableBody = document.querySelector('#backtesting-table tbody');
+const backtestingPeriod = document.getElementById('backtesting-period');
+const backtestingPortfolio = document.getElementById('backtesting-portfolio');
+const runBacktestBtn = document.getElementById('run-backtest');
+const backtestingResult = document.getElementById('backtesting-result');
+const backtestingUpdated = document.getElementById('backtesting-updated');
 
 const chartInstances = {};
 
@@ -86,6 +107,76 @@ async function runIngest() {
     ingestResult.textContent = `Error: ${error}`;
   } finally {
     runIngestBtn.disabled = false;
+  }
+}
+
+let riskPresets = {};
+
+function fillRiskInputs(riskProfile) {
+  riskPositionSizeInput.value = (riskProfile.positionSizePct * 100).toFixed(1);
+  riskStopLossInput.value = (riskProfile.stopLossPct * 100).toFixed(1);
+  riskTakeProfitInput.value = (riskProfile.takeProfitPct * 100).toFixed(1);
+  riskMaxPositionsInput.value = riskProfile.maxPositions;
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings');
+    const data = await res.json();
+    if (!data.ok) {
+      settingsResult.textContent = `Error al cargar configuración: ${data.error}`;
+      return;
+    }
+
+    riskPresets = data.presets;
+
+    claudeModelSelect.innerHTML = '';
+    data.models.forEach((model) => {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = model.label;
+      claudeModelSelect.appendChild(option);
+    });
+
+    riskPresetSelect.value = data.settings.riskPreset;
+    fillRiskInputs(data.settings.riskProfile);
+    claudeModelSelect.value = data.settings.claudeModel || data.models[0].id;
+
+    settingsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    settingsResult.textContent = `Error al cargar configuración: ${error}`;
+  }
+}
+
+async function saveSettings() {
+  saveSettingsBtn.disabled = true;
+  settingsResult.textContent = 'Guardando...';
+  try {
+    const body = {
+      riskPreset: riskPresetSelect.value,
+      riskProfile: {
+        positionSizePct: Number(riskPositionSizeInput.value) / 100,
+        stopLossPct: Number(riskStopLossInput.value) / 100,
+        takeProfitPct: Number(riskTakeProfitInput.value) / 100,
+        maxPositions: Number(riskMaxPositionsInput.value),
+      },
+      claudeModel: claudeModelSelect.value,
+    };
+
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    settingsResult.textContent = JSON.stringify(data, null, 2);
+    if (data.ok) {
+      settingsUpdated.textContent = `Guardado: ${new Date(data.savedAt).toLocaleTimeString()}`;
+    }
+  } catch (error) {
+    settingsResult.textContent = `Error: ${error}`;
+  } finally {
+    saveSettingsBtn.disabled = false;
   }
 }
 
@@ -443,6 +534,129 @@ async function loadSnapshots() {
   }
 }
 
+function recommendationClass(recommendation) {
+  if (recommendation === 'buy') return 'signal-buy';
+  if (recommendation === 'avoid') return 'signal-sell';
+  return 'signal-hold';
+}
+
+function renderAssessments(assessments) {
+  assessmentsTableBody.innerHTML = '';
+  if (assessments.length === 0) {
+    assessmentsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin evaluaciones todavía (requiere ANTHROPIC_API_KEY y un ciclo de trading).</td></tr>';
+    return;
+  }
+
+  assessments.forEach((assessment) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${assessment.symbol}</td>
+      <td>${new Date(assessment.ts).toLocaleString()}</td>
+      <td>${fmtNum(assessment.score)}</td>
+      <td><span class="${recommendationClass(assessment.recommendation)}">${assessment.recommendation.toUpperCase()}</span></td>
+      <td>${assessment.confidence !== null ? fmtNum(assessment.confidence) : '—'}</td>
+      <td>${assessment.adjustedEntryPrice !== null ? fmtMoney(assessment.adjustedEntryPrice) : '—'}</td>
+      <td>${assessment.adjustedExitPrice !== null ? fmtMoney(assessment.adjustedExitPrice) : '—'}</td>
+      <td class="muted">${assessment.rationale ?? ''}</td>
+    `;
+    assessmentsTableBody.appendChild(tr);
+  });
+}
+
+async function loadAssessments() {
+  refreshAssessmentsBtn.disabled = true;
+  try {
+    const res = await fetch('/api/assessments');
+    const data = await res.json();
+    if (data.ok) {
+      renderAssessments(data.assessments);
+      assessmentsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
+    } else {
+      assessmentsTableBody.innerHTML = `<tr><td colspan="8" class="muted">Error: ${data.error}</td></tr>`;
+    }
+  } catch (error) {
+    assessmentsTableBody.innerHTML = `<tr><td colspan="8" class="muted">Error al cargar evaluaciones: ${error}</td></tr>`;
+  } finally {
+    refreshAssessmentsBtn.disabled = false;
+  }
+}
+
+function renderBacktesting(run) {
+  if (!run) {
+    backtestingTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin corridas todavía. Ejecutá un backtest.</td></tr>';
+    backtestingPeriod.textContent = '';
+    backtestingPortfolio.textContent = '';
+    return;
+  }
+
+  const { run: meta, trades } = run;
+  const summary = meta.summary || {};
+  const symbols = summary.symbols || [];
+  const portfolio = summary.portfolio || {};
+
+  const startDate = meta.startDate ? String(meta.startDate).slice(0, 10) : 'n/a';
+  const endDate = meta.endDate ? String(meta.endDate).slice(0, 10) : 'n/a';
+  backtestingPeriod.textContent =
+    `Periodo: ${startDate} → ${endDate} ` +
+    `(última corrida: ${new Date(meta.runAt).toLocaleString()}, ${trades.length} trades guardados)`;
+
+  backtestingTableBody.innerHTML = '';
+  if (symbols.length === 0) {
+    backtestingTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin resultados por símbolo.</td></tr>';
+  } else {
+    symbols.forEach((s) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${s.symbol}</td>
+        <td>${s.trades}</td>
+        <td>${s.winRate !== null ? `${fmtNum(s.winRate, 1)}%` : '—'}</td>
+        <td class="${s.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(s.totalReturnPct)}%</td>
+        <td>${s.avgReturnPct !== null ? `${fmtNum(s.avgReturnPct)}%` : '—'}</td>
+        <td>${fmtNum(s.maxDrawdownPct)}%</td>
+      `;
+      backtestingTableBody.appendChild(tr);
+    });
+  }
+
+  backtestingPortfolio.textContent =
+    `Portafolio: ${portfolio.symbols ?? '—'} símbolos · ${portfolio.totalTrades ?? 0} trades · ` +
+    `retorno prom. ${portfolio.avgReturnPct !== null && portfolio.avgReturnPct !== undefined ? `${fmtNum(portfolio.avgReturnPct)}%` : '—'} · ` +
+    `win rate prom. ${portfolio.avgWinRatePct !== null && portfolio.avgWinRatePct !== undefined ? `${fmtNum(portfolio.avgWinRatePct, 1)}%` : '—'} · ` +
+    `mejor: ${portfolio.bestSymbol ?? '—'} · peor: ${portfolio.worstSymbol ?? '—'}`;
+}
+
+async function loadBacktesting() {
+  try {
+    const res = await fetch('/api/backtesting/results');
+    const data = await res.json();
+    if (data.ok) {
+      renderBacktesting(data.run);
+      backtestingUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
+    } else {
+      backtestingTableBody.innerHTML = `<tr><td colspan="6" class="muted">Error: ${data.error}</td></tr>`;
+    }
+  } catch (error) {
+    backtestingTableBody.innerHTML = `<tr><td colspan="6" class="muted">Error al cargar backtesting: ${error}</td></tr>`;
+  }
+}
+
+async function runBacktest() {
+  runBacktestBtn.disabled = true;
+  backtestingResult.textContent = 'Ejecutando backtest...';
+  try {
+    const res = await fetch('/api/backtesting/run', { method: 'POST' });
+    const data = await res.json();
+    backtestingResult.textContent = JSON.stringify(data, null, 2);
+    if (data.ok) {
+      await loadBacktesting();
+    }
+  } catch (error) {
+    backtestingResult.textContent = `Error: ${error}`;
+  } finally {
+    runBacktestBtn.disabled = false;
+  }
+}
+
 async function loadGrafana() {
   try {
     const res = await fetch('/api/config');
@@ -467,10 +681,30 @@ refreshHealthBtn.addEventListener('click', loadHealth);
 runIngestBtn.addEventListener('click', runIngest);
 runTradeBtn.addEventListener('click', runTradingCycle);
 refreshSnapshotsBtn.addEventListener('click', loadSnapshots);
+refreshAssessmentsBtn.addEventListener('click', loadAssessments);
+runBacktestBtn.addEventListener('click', runBacktest);
+saveSettingsBtn.addEventListener('click', saveSettings);
+
+riskPresetSelect.addEventListener('change', () => {
+  const preset = riskPresetSelect.value;
+  if (preset !== 'personalizado' && riskPresets[preset]) {
+    fillRiskInputs(riskPresets[preset]);
+  }
+});
+
+[riskPositionSizeInput, riskStopLossInput, riskTakeProfitInput, riskMaxPositionsInput].forEach((input) => {
+  input.addEventListener('input', () => {
+    riskPresetSelect.value = 'personalizado';
+  });
+});
 
 loadHealth();
 loadGrafana();
+loadSettings();
 loadTradingStatus();
 loadSnapshots();
+loadAssessments();
+loadBacktesting();
 setInterval(loadHealth, 60000);
 setInterval(loadTradingStatus, 60000);
+setInterval(loadAssessments, 60000);

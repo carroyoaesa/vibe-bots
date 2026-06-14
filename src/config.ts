@@ -44,6 +44,11 @@ export interface FredConfig {
   apiKey: string;
 }
 
+export interface AnthropicConfig {
+  apiKey: string;
+  model: string;
+}
+
 export interface WebConfig {
   port: number;
   grafanaPublicUrl?: string;
@@ -147,6 +152,18 @@ export function loadFredConfig(): FredConfig {
   }
 
   return { apiKey };
+}
+
+export function loadAnthropicConfig(): AnthropicConfig {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('Falta ANTHROPIC_API_KEY. Revisa .env o secure/keys.env.');
+  }
+
+  const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+
+  return { apiKey, model };
 }
 
 export function loadWebConfig(): WebConfig {

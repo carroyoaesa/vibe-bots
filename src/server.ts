@@ -7,11 +7,16 @@ import { runTradingCycle } from './tradingRunner';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, listSnapshots, getSnapshotStream } from './services/storage';
 import { createAlpacaClient, getAccount, getPositions } from './services/alpaca';
-import { getRecentOrders } from './services/tradingStore';
+import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals } from './services/tradingStore';
 import { getRecentBars, getCloses } from './services/marketStore';
 import { buildChartSeries } from './strategy/chart';
 import { computeSignal } from './strategy/signals';
+import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
+import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
+import { runBacktestForWatchlist } from './backtestRunner';
+import { setupSettingsSchema, getSettings, saveSettings } from './services/settingsStore';
+import { CLAUDE_MODEL_OPTIONS } from './services/claude';
 
 const CHART_LOOKBACK_BARS = 90;
 const SIGNAL_CLOSES_LOOKBACK = 60;
@@ -22,6 +27,7 @@ const config = loadWebConfig();
 const app = express();
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(express.json());
 
 app.get('/api/config', (_req, res) => {
   res.json({
@@ -45,17 +51,32 @@ app.get('/api/trading/status', async (_req, res) => {
   const alpacaClient = createAlpacaClient(loadAlpacaConfig());
 
   try {
-    const [account, positions, orders] = await Promise.all([
+    await setupSettingsSchema(pool);
+    const settings = await getSettings(pool);
+
+    const [account, positions, orders, latestSignals] = await Promise.all([
       getAccount(alpacaClient),
       getPositions(alpacaClient),
       getRecentOrders(pool, 20),
+      getLatestSignals(pool),
     ]);
+
+    const latestBySymbol = new Map(latestSignals.map((row) => [row.symbol, row]));
 
     const signals = await Promise.all(
       WATCHLIST.map(async (symbol) => {
         const closes = await getCloses(pool, symbol, SIGNAL_CLOSES_LOOKBACK);
-        const signal = computeSignal(symbol, closes);
-        return { ...signal, type: ETF_SYMBOLS.includes(symbol) ? ('ETF' as const) : ('STOCK' as const) };
+        const signal = computeSignal(symbol, closes, settings.riskProfile);
+        const latest = latestBySymbol.get(symbol);
+
+        return {
+          ...signal,
+          // Refleja el último precio verificado/ajustado por la fase de IA (si lo hay),
+          // sin llamar a Claude en cada poll del dashboard.
+          estimatedEntryPrice: latest?.estimatedEntryPrice ?? signal.estimatedEntryPrice,
+          estimatedExitPrice: latest?.estimatedExitPrice ?? signal.estimatedExitPrice,
+          type: ETF_SYMBOLS.includes(symbol) ? ('ETF' as const) : ('STOCK' as const),
+        };
       })
     );
 
@@ -102,6 +123,77 @@ app.post('/api/trading/run', async (_req, res) => {
   }
 });
 
+const VALID_RISK_PRESETS = ['conservador', 'moderado', 'agresivo', 'personalizado'];
+const VALID_CLAUDE_MODELS = CLAUDE_MODEL_OPTIONS.map((model) => model.id);
+
+app.get('/api/settings', async (_req, res) => {
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSettingsSchema(pool);
+    const settings = await getSettings(pool);
+
+    res.json({ ok: true, settings, presets: RISK_PROFILE_PRESETS, models: CLAUDE_MODEL_OPTIONS });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.post('/api/settings', async (req, res) => {
+  const body = req.body ?? {};
+  const { riskPreset, riskProfile } = body;
+  const claudeModel = body.claudeModel ?? null;
+
+  if (!VALID_RISK_PRESETS.includes(riskPreset)) {
+    res.status(400).json({ ok: false, error: `riskPreset inválido: debe ser uno de ${VALID_RISK_PRESETS.join(', ')}.` });
+    return;
+  }
+
+  if (
+    typeof riskProfile !== 'object' || riskProfile === null ||
+    typeof riskProfile.positionSizePct !== 'number' || riskProfile.positionSizePct <= 0 || riskProfile.positionSizePct > 1 ||
+    typeof riskProfile.stopLossPct !== 'number' || riskProfile.stopLossPct <= 0 || riskProfile.stopLossPct >= 1 ||
+    typeof riskProfile.takeProfitPct !== 'number' || riskProfile.takeProfitPct <= 0 || riskProfile.takeProfitPct >= 2 ||
+    typeof riskProfile.maxPositions !== 'number' || !Number.isInteger(riskProfile.maxPositions) ||
+    riskProfile.maxPositions < 1 || riskProfile.maxPositions > 20
+  ) {
+    res.status(400).json({
+      ok: false,
+      error: 'riskProfile inválido: positionSizePct debe estar en (0,1], stopLossPct en (0,1), takeProfitPct en (0,2) y maxPositions debe ser un entero entre 1 y 20.',
+    });
+    return;
+  }
+
+  if (claudeModel !== null && !VALID_CLAUDE_MODELS.includes(claudeModel)) {
+    res.status(400).json({ ok: false, error: `claudeModel inválido: debe ser uno de ${VALID_CLAUDE_MODELS.join(', ')} o null.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSettingsSchema(pool);
+    await saveSettings(pool, {
+      riskPreset,
+      riskProfile: {
+        positionSizePct: riskProfile.positionSizePct,
+        stopLossPct: riskProfile.stopLossPct,
+        takeProfitPct: riskProfile.takeProfitPct,
+        maxPositions: riskProfile.maxPositions,
+      },
+      claudeModel,
+    });
+
+    res.json({ ok: true, savedAt: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
 app.post('/api/ingest', async (_req, res) => {
   try {
     const summary = await runIngest();
@@ -112,6 +204,52 @@ app.post('/api/ingest', async (_req, res) => {
       finishedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+});
+
+app.post('/api/backtesting/run', async (_req, res) => {
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupBacktestSchema(pool);
+    const result = await runBacktestForWatchlist(pool);
+    res.json({ ok: true, finishedAt: new Date().toISOString(), ...result });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      finishedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/backtesting/results', async (_req, res) => {
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupBacktestSchema(pool);
+    const run = await getLatestBacktestRun(pool);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), run });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/assessments', async (_req, res) => {
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupTradingSchema(pool);
+    const assessments = await getLatestAssessments(pool);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), assessments });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
   }
 });
 

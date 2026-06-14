@@ -1,5 +1,5 @@
 import { sma, rsi, momentum, estimateEntryPrice } from './indicators';
-import { STRATEGY_PARAMS, RISK_PROFILE } from './config';
+import { STRATEGY_PARAMS, RISK_PROFILE, RiskProfile } from './config';
 
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD';
 
@@ -23,7 +23,7 @@ export interface SignalResult {
  * - SELL: SMA rápida cruza por debajo de la lenta (señal de salida de tendencia).
  * - HOLD: sin cruce, o datos históricos insuficientes.
  */
-export function computeSignal(symbol: string, closes: number[]): SignalResult {
+export function computeSignal(symbol: string, closes: number[], riskProfile: RiskProfile = RISK_PROFILE): SignalResult {
   const { smaFastPeriod, smaSlowPeriod, rsiPeriod, rsiOverbought, momentumPeriod } = STRATEGY_PARAMS;
 
   if (closes.length === 0) {
@@ -66,7 +66,7 @@ export function computeSignal(symbol: string, closes: number[]): SignalResult {
 
   const estimatedEntryPrice = estimateEntryPrice(closes, smaFastPeriod, smaSlow);
   // Precio objetivo de salida (take-profit) a partir del precio estimado de entrada.
-  const estimatedExitPrice = estimatedEntryPrice !== null ? estimatedEntryPrice * (1 + RISK_PROFILE.takeProfitPct) : null;
+  const estimatedExitPrice = estimatedEntryPrice !== null ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct) : null;
 
   const crossedUp = smaFastPrev <= smaSlowPrev && smaFast > smaSlow;
   const crossedDown = smaFastPrev >= smaSlowPrev && smaFast < smaSlow;

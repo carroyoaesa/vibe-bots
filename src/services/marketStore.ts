@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { DailyBar, NewsItem } from './marketData';
 import { MacroObservation } from './fred';
+import { CompanyProfile } from './fmp';
 
 export async function setupIngestSchema(pool: Pool): Promise<void> {
   await pool.query(`
@@ -139,4 +140,83 @@ export async function saveMacroObservations(pool: Pool, observations: MacroObser
       [obs.seriesId, obs.date, obs.value]
     );
   }
+}
+
+/** Último perfil fundamental (FMP) guardado para un símbolo, o `null` si no hay ninguno. */
+export async function getLatestFundamentals(pool: Pool, symbol: string): Promise<CompanyProfile | null> {
+  const result = await pool.query<{ data: CompanyProfile }>(
+    `SELECT data FROM fundamentals_snapshots
+     WHERE symbol = $1 AND source = 'fmp'
+     ORDER BY fetched_at DESC
+     LIMIT 1`,
+    [symbol]
+  );
+
+  if (result.rows.length === 0) return null;
+  return result.rows[0].data;
+}
+
+/** Noticias más recientes que mencionan a `symbol`, ordenadas por fecha de publicación descendente. */
+export async function getRecentNewsForSymbol(pool: Pool, symbol: string, limit: number): Promise<NewsItem[]> {
+  const result = await pool.query(
+    `SELECT id, headline, summary, source, url, symbols, published_at
+     FROM news_items
+     WHERE $1 = ANY(symbols)
+     ORDER BY published_at DESC
+     LIMIT $2`,
+    [symbol, limit]
+  );
+
+  return result.rows.map((row) => ({
+    id: Number(row.id),
+    headline: row.headline,
+    summary: row.summary,
+    source: row.source,
+    url: row.url,
+    symbols: row.symbols,
+    publishedAt: new Date(row.published_at).toISOString(),
+  }));
+}
+
+/** Última observación guardada por cada serie macro solicitada. */
+export async function getLatestMacroObservations(pool: Pool, seriesIds: string[]): Promise<MacroObservation[]> {
+  const result = await pool.query(
+    `SELECT DISTINCT ON (series_id) series_id, obs_date, value
+     FROM macro_series
+     WHERE series_id = ANY($1)
+     ORDER BY series_id, obs_date DESC`,
+    [seriesIds]
+  );
+
+  return result.rows.map((row) => ({
+    seriesId: row.series_id,
+    date: new Date(row.obs_date).toISOString().slice(0, 10),
+    value: row.value !== null ? Number(row.value) : null,
+  }));
+}
+
+export interface OhlcBar {
+  ts: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+/** Historial completo de velas diarias (OHLC) de un símbolo, en orden ascendente por fecha. */
+export async function getAllBars(pool: Pool, symbol: string): Promise<OhlcBar[]> {
+  const result = await pool.query(
+    `SELECT ts, open, high, low, close FROM market_bars
+     WHERE symbol = $1 AND timeframe = '1Day'
+     ORDER BY ts ASC`,
+    [symbol]
+  );
+
+  return result.rows.map((row) => ({
+    ts: new Date(row.ts).toISOString(),
+    open: Number(row.open),
+    high: Number(row.high),
+    low: Number(row.low),
+    close: Number(row.close),
+  }));
 }

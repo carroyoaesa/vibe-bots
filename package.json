@@ -10,6 +10,8 @@
     "ingest": "ts-node src/ingest.ts",
     "trade": "ts-node src/trade.ts",
     "trade:cron": "ts-node src/cronTrade.ts",
+    "backtest": "ts-node src/backtest.ts",
+    "backfill-history": "ts-node src/backfillHistory.ts",
     "web": "ts-node src/server.ts",
     "web:start": "./scripts/start-web.sh",
     "web:stop": "./scripts/stop-web.sh",

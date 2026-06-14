@@ -40,6 +40,60 @@
 
     <section class="card">
       <div class="section-header">
+        <h2>Configuración</h2>
+        <div class="section-actions">
+          <span id="settings-updated" class="muted"></span>
+          <button id="save-settings">💾 Guardar</button>
+        </div>
+      </div>
+      <p class="muted">
+        Perfil de riesgo y modelo de Claude usados por el próximo ciclo de trading/backtest
+        (afecta a las secciones Trading, Evaluaciones de IA y Backtesting). Los cambios se
+        aplican desde el próximo ciclo, sin reiniciar el dashboard ni el bot.
+      </p>
+
+      <h3>Perfil de riesgo</h3>
+      <div class="form-grid">
+        <label class="form-field">
+          Preset
+          <select id="risk-preset">
+            <option value="conservador">Conservador</option>
+            <option value="moderado">Moderado</option>
+            <option value="agresivo">Agresivo</option>
+            <option value="personalizado">Personalizado</option>
+          </select>
+        </label>
+        <label class="form-field">
+          Tamaño posición (% equity)
+          <input type="number" id="risk-position-size" min="0.1" max="100" step="0.1" />
+        </label>
+        <label class="form-field">
+          Stop-loss (%)
+          <input type="number" id="risk-stop-loss" min="0.1" max="99" step="0.1" />
+        </label>
+        <label class="form-field">
+          Take-profit (%)
+          <input type="number" id="risk-take-profit" min="0.1" max="199" step="0.1" />
+        </label>
+        <label class="form-field">
+          Máx. posiciones abiertas
+          <input type="number" id="risk-max-positions" min="1" max="20" step="1" />
+        </label>
+      </div>
+
+      <h3>Modelo de Claude (evaluación de IA, Fase 4)</h3>
+      <div class="form-grid">
+        <label class="form-field">
+          Modelo
+          <select id="claude-model"></select>
+        </label>
+      </div>
+
+      <pre id="settings-result" class="result"></pre>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
         <h2>Trading (Fase 2 - paper)</h2>
         <button id="run-trade">🤖 Ejecutar ciclo de trading</button>
       </div>
@@ -110,6 +164,36 @@
 
     <section class="card">
       <div class="section-header">
+        <h2>Evaluaciones de IA (Claude)</h2>
+        <div class="section-actions">
+          <span id="assessments-updated" class="muted"></span>
+          <button id="refresh-assessments">🔄 Actualizar</button>
+        </div>
+      </div>
+      <p class="muted">
+        Evaluación de Claude para cada símbolo (técnico + fundamentales + noticias + macro),
+        calculada una vez por ciclo de trading. Solo puede <strong>vetar</strong> una señal BUY
+        (recomendación "avoid" → acción <code>AI_BLOCKED</code>); nunca genera compras ni bloquea
+        ventas. Mientras falte <code>ANTHROPIC_API_KEY</code>, esta sección queda vacía y el
+        ciclo de trading sigue igual que antes (fail-open).
+      </p>
+      <div class="table-wrap">
+        <table id="assessments-table">
+          <thead>
+            <tr>
+              <th>Símbolo</th><th>Fecha</th><th>Score</th><th>Recomendación</th><th>Confianza</th>
+              <th title="Precio de entrada propuesto por Claude (— si no propuso ninguno)">Ajuste entrada</th>
+              <th title="Precio de salida propuesto por Claude (— si no propuso ninguno)">Ajuste salida</th>
+              <th>Justificación</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
         <h2>Snapshots (MinIO)</h2>
         <div class="section-actions">
           <span id="snapshots-updated" class="muted"></span>
@@ -127,6 +211,33 @@
           <tbody></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <h2>Backtesting</h2>
+        <div class="section-actions">
+          <span id="backtesting-updated" class="muted"></span>
+          <button id="run-backtest">📊 Ejecutar backtest</button>
+        </div>
+      </div>
+      <p class="muted">
+        Simula la estrategia (Fase 2) símbolo por símbolo sobre el historial diario disponible,
+        en % de retorno (sin modelar equity/cash compartido ni el cap de posiciones). Usa las
+        mismas reglas que las bracket orders reales: entrada límite al precio est., take-profit
+        +6% / stop-loss -3%, o salida por señal SELL.
+      </p>
+      <div id="backtesting-period" class="muted"></div>
+      <div class="table-wrap">
+        <table id="backtesting-table">
+          <thead>
+            <tr><th>Símbolo</th><th>Trades</th><th>Win rate</th><th>Retorno total</th><th>Retorno prom.</th><th>Max drawdown</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="backtesting-portfolio" class="muted"></div>
+      <pre id="backtesting-result" class="result"></pre>
     </section>
 
     <section class="card">

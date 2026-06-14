@@ -36,6 +36,22 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
       raw JSONB
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_assessments (
+      id SERIAL PRIMARY KEY,
+      symbol TEXT NOT NULL,
+      ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      score NUMERIC,
+      recommendation TEXT NOT NULL,
+      confidence NUMERIC,
+      rationale TEXT,
+      model TEXT NOT NULL
+    )
+  `);
+
+  await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_entry_price NUMERIC`);
+  await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_exit_price NUMERIC`);
 }
 
 export async function saveSignal(pool: Pool, signal: SignalResult): Promise<number> {
@@ -162,5 +178,65 @@ export async function getRecentOrders(pool: Pool, limit: number): Promise<Recent
     takeProfitPrice: row.take_profit_price !== null ? Number(row.take_profit_price) : null,
     stopLossPrice: row.stop_loss_price !== null ? Number(row.stop_loss_price) : null,
     status: row.status,
+  }));
+}
+
+export interface AiAssessmentRecord {
+  symbol: string;
+  score: number | null;
+  recommendation: 'buy' | 'hold' | 'avoid';
+  confidence: number | null;
+  rationale: string;
+  model: string;
+  adjustedEntryPrice: number | null;
+  adjustedExitPrice: number | null;
+}
+
+export async function saveAssessment(pool: Pool, assessment: AiAssessmentRecord): Promise<void> {
+  await pool.query(
+    `INSERT INTO ai_assessments (symbol, score, recommendation, confidence, rationale, model, adjusted_entry_price, adjusted_exit_price)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      assessment.symbol,
+      assessment.score,
+      assessment.recommendation,
+      assessment.confidence,
+      assessment.rationale,
+      assessment.model,
+      assessment.adjustedEntryPrice,
+      assessment.adjustedExitPrice,
+    ]
+  );
+}
+
+export interface LatestAssessmentRow {
+  symbol: string;
+  ts: string;
+  score: number | null;
+  recommendation: string;
+  confidence: number | null;
+  rationale: string | null;
+  model: string;
+  adjustedEntryPrice: number | null;
+  adjustedExitPrice: number | null;
+}
+
+export async function getLatestAssessments(pool: Pool): Promise<LatestAssessmentRow[]> {
+  const result = await pool.query(`
+    SELECT DISTINCT ON (symbol) symbol, ts, score, recommendation, confidence, rationale, model, adjusted_entry_price, adjusted_exit_price
+    FROM ai_assessments
+    ORDER BY symbol, ts DESC
+  `);
+
+  return result.rows.map((row) => ({
+    symbol: row.symbol,
+    ts: row.ts,
+    score: row.score !== null ? Number(row.score) : null,
+    recommendation: row.recommendation,
+    confidence: row.confidence !== null ? Number(row.confidence) : null,
+    rationale: row.rationale,
+    model: row.model,
+    adjustedEntryPrice: row.adjusted_entry_price !== null ? Number(row.adjusted_entry_price) : null,
+    adjustedExitPrice: row.adjusted_exit_price !== null ? Number(row.adjusted_exit_price) : null,
   }));
 }
