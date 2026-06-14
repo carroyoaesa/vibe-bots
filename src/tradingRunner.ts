@@ -86,12 +86,15 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
                 reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${signal.price.toFixed(2)})`,
               });
             } else {
-              const takeProfitPrice = signal.price * (1 + RISK_PROFILE.takeProfitPct);
-              const stopLossPrice = signal.price * (1 - RISK_PROFILE.stopLossPct);
+              // Orden límite al precio estimado de entrada (no a mercado), con TP/SL relativos a ese precio.
+              const entryPrice = signal.estimatedEntryPrice ?? signal.price;
+              const takeProfitPrice = entryPrice * (1 + RISK_PROFILE.takeProfitPct);
+              const stopLossPrice = entryPrice * (1 - RISK_PROFILE.stopLossPct);
 
               const order = await placeBracketBuyOrder(alpacaClient, {
                 symbol,
                 qty,
+                limitPrice: entryPrice,
                 takeProfitPrice,
                 stopLossPrice,
               });

@@ -6,11 +6,16 @@ const ingestResult = document.getElementById('ingest-result');
 const grafanaContainer = document.getElementById('grafana-container');
 
 const tradingAccount = document.getElementById('trading-account');
-const signalsTableBody = document.querySelector('#signals-table tbody');
+const signalsTableBodyEtf = document.querySelector('#signals-table-etf tbody');
+const signalsTableBodyStock = document.querySelector('#signals-table-stock tbody');
+const signalChartsEtf = document.getElementById('signal-charts-etf');
+const signalChartsStock = document.getElementById('signal-charts-stock');
 const positionsTableBody = document.querySelector('#positions-table tbody');
 const ordersTableBody = document.querySelector('#orders-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
 const tradeResult = document.getElementById('trade-result');
+
+const chartInstances = {};
 
 function renderHealth(data) {
   healthGrid.innerHTML = '';
@@ -93,6 +98,45 @@ function signalClass(signal) {
   return 'signal-hold';
 }
 
+/**
+ * Puntaje de "qué tan conveniente es comprar ahora": prioriza señal BUY/HOLD/SELL,
+ * y dentro de cada una favorece momentum positivo, RSI cercano a neutral (no sobrecomprado)
+ * y tendencia alcista (SMA10 por encima de SMA30).
+ */
+function attractivenessScore(signal) {
+  const signalScore = { BUY: 2, HOLD: 1, SELL: 0 }[signal.signal] ?? 1;
+  const momentumScore = signal.momentum !== null ? signal.momentum / 10 : 0;
+  const rsiScore = signal.rsi !== null ? (50 - Math.abs(signal.rsi - 50)) / 50 : 0;
+  const trendScore = signal.smaFast !== null && signal.smaSlow ? (signal.smaFast - signal.smaSlow) / signal.smaSlow : 0;
+
+  return signalScore * 10 + momentumScore + rsiScore + trendScore * 10;
+}
+
+function renderSignalsTable(tbody, signals) {
+  tbody.innerHTML = '';
+  if (signals.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+    return;
+  }
+
+  signals.forEach((signal) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${signal.symbol}</td>
+      <td>${fmtMoney(signal.price)}</td>
+      <td>${fmtNum(signal.smaFast)}</td>
+      <td>${fmtNum(signal.smaSlow)}</td>
+      <td>${fmtNum(signal.rsi)}</td>
+      <td>${signal.momentum !== null ? `${fmtNum(signal.momentum)}%` : '—'}</td>
+      <td>${signal.estimatedEntryPrice !== null ? fmtMoney(signal.estimatedEntryPrice) : '—'}</td>
+      <td>${signal.estimatedExitPrice !== null ? fmtMoney(signal.estimatedExitPrice) : '—'}</td>
+      <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
+      <td class="muted">${signal.reason}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
 function renderTradingStatus(data) {
   const { account, positions, signals, orders } = data;
 
@@ -100,25 +144,14 @@ function renderTradingStatus(data) {
     `Cuenta ${account.accountNumber} (${account.status}) · Equity: ${fmtMoney(account.equity)} · ` +
     `Cash: ${fmtMoney(account.cash)} · Buying power: ${fmtMoney(account.buyingPower)}`;
 
-  signalsTableBody.innerHTML = '';
-  if (signals.length === 0) {
-    signalsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin señales todavía. Ejecutá un ciclo de trading.</td></tr>';
-  } else {
-    signals.forEach((signal) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${signal.symbol}</td>
-        <td>${fmtMoney(signal.price)}</td>
-        <td>${fmtNum(signal.smaFast)}</td>
-        <td>${fmtNum(signal.smaSlow)}</td>
-        <td>${fmtNum(signal.rsi)}</td>
-        <td>${signal.momentum !== null ? `${fmtNum(signal.momentum)}%` : '—'}</td>
-        <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
-        <td class="muted">${signal.reason}</td>
-      `;
-      signalsTableBody.appendChild(tr);
-    });
-  }
+  const etfSignals = signals.filter((signal) => signal.type === 'ETF').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
+  const stockSignals = signals.filter((signal) => signal.type === 'STOCK').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
+
+  renderSignalsTable(signalsTableBodyEtf, etfSignals);
+  renderSignalsTable(signalsTableBodyStock, stockSignals);
+
+  renderSignalCharts(signalChartsEtf, etfSignals);
+  renderSignalCharts(signalChartsStock, stockSignals);
 
   positionsTableBody.innerHTML = '';
   if (positions.length === 0) {
@@ -157,6 +190,170 @@ function renderTradingStatus(data) {
       ordersTableBody.appendChild(tr);
     });
   }
+}
+
+async function renderSignalCharts(container, signals) {
+  if (signals.length === 0) {
+    container.innerHTML = '<p class="muted">Sin datos todavía. Ejecutá la ingesta y un ciclo de trading.</p>';
+    return;
+  }
+
+  const results = await Promise.all(
+    signals.map(async (signal) => {
+      try {
+        const res = await fetch(`/api/trading/chart/${signal.symbol}`);
+        const data = await res.json();
+        return { symbol: signal.symbol, ok: data.ok, points: data.points, error: data.error };
+      } catch (error) {
+        return { symbol: signal.symbol, ok: false, error: String(error) };
+      }
+    })
+  );
+
+  const seenSymbols = new Set(results.map((result) => result.symbol));
+  container.querySelectorAll('.chart-card').forEach((card) => {
+    const symbol = card.id.replace('chart-card-', '');
+    if (!seenSymbols.has(symbol)) {
+      if (chartInstances[symbol]) {
+        chartInstances[symbol].destroy();
+        delete chartInstances[symbol];
+      }
+      card.remove();
+    }
+  });
+
+  results.forEach((result, index) => {
+    let card = document.getElementById(`chart-card-${result.symbol}`);
+    let canvas;
+    let noDataMsg;
+
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'chart-card';
+      card.id = `chart-card-${result.symbol}`;
+
+      const title = document.createElement('h4');
+      title.textContent = result.symbol;
+      card.appendChild(title);
+
+      const canvasWrap = document.createElement('div');
+      canvasWrap.className = 'chart-canvas-wrap';
+
+      canvas = document.createElement('canvas');
+      canvasWrap.appendChild(canvas);
+      card.appendChild(canvasWrap);
+
+      noDataMsg = document.createElement('p');
+      noDataMsg.className = 'muted chart-no-data';
+      noDataMsg.textContent = 'Sin datos históricos todavía. Ejecutá la ingesta.';
+      card.appendChild(noDataMsg);
+
+      container.appendChild(card);
+    } else {
+      canvas = card.querySelector('canvas');
+      noDataMsg = card.querySelector('.chart-no-data');
+    }
+
+    // Mantener el orden según el ranking de atractivo.
+    if (container.children[index] !== card) {
+      container.insertBefore(card, container.children[index] ?? null);
+    }
+
+    if (chartInstances[result.symbol]) {
+      chartInstances[result.symbol].destroy();
+      delete chartInstances[result.symbol];
+    }
+
+    if (!result.ok || !result.points || result.points.length === 0) {
+      canvas.classList.add('hidden');
+      noDataMsg.classList.remove('hidden');
+      return;
+    }
+
+    canvas.classList.remove('hidden');
+    noDataMsg.classList.add('hidden');
+
+    const labels = result.points.map((point) => new Date(point.ts).toLocaleDateString());
+    const closes = result.points.map((point) => point.close);
+    const smaFast = result.points.map((point) => point.smaFast);
+    const smaSlow = result.points.map((point) => point.smaSlow);
+
+    const datasets = [
+      {
+        label: 'Precio',
+        data: closes,
+        borderColor: '#4a82f0',
+        backgroundColor: 'transparent',
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.1,
+      },
+      {
+        label: 'SMA10',
+        data: smaFast,
+        borderColor: '#2ecc71',
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+      },
+      {
+        label: 'SMA30',
+        data: smaSlow,
+        borderColor: '#e67e22',
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+      },
+    ];
+
+    const signal = signals.find((s) => s.symbol === result.symbol);
+    if (signal && signal.estimatedEntryPrice !== null) {
+      datasets.push({
+        label: 'Precio est. entrada',
+        data: labels.map(() => signal.estimatedEntryPrice),
+        borderColor: '#f1c40f',
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        borderDash: [6, 4],
+        pointRadius: 0,
+        tension: 0,
+      });
+    }
+    if (signal && signal.estimatedExitPrice !== null) {
+      datasets.push({
+        label: 'Precio est. salida',
+        data: labels.map(() => signal.estimatedExitPrice),
+        borderColor: '#9b59b6',
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        borderDash: [6, 4],
+        pointRadius: 0,
+        tension: 0,
+      });
+    }
+
+    chartInstances[result.symbol] = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels,
+        datasets,
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { ticks: { color: '#9aa0a6', maxTicksLimit: 8 }, grid: { color: '#2a2e35' } },
+          y: { ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e35' } },
+        },
+        plugins: {
+          legend: { labels: { color: '#c7c9cc' } },
+        },
+      },
+    });
+  });
 }
 
 async function loadTradingStatus() {

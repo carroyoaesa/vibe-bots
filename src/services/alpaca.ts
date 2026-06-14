@@ -88,17 +88,19 @@ export async function getOpenOrders(client: AxiosInstance, symbol?: string): Pro
 export interface BracketBuyOrderRequest {
   symbol: string;
   qty: number;
+  limitPrice: number;
   takeProfitPrice: number;
   stopLossPrice: number;
 }
 
-/** Coloca una orden de compra a mercado con take-profit y stop-loss adjuntos (order_class=bracket). */
+/** Coloca una orden de compra límite (al precio estimado de entrada) con take-profit y stop-loss adjuntos (order_class=bracket). */
 export async function placeBracketBuyOrder(client: AxiosInstance, req: BracketBuyOrderRequest) {
   const { data } = await client.post('/v2/orders', {
     symbol: req.symbol,
     qty: req.qty.toString(),
     side: 'buy',
-    type: 'market',
+    type: 'limit',
+    limit_price: req.limitPrice.toFixed(2),
     time_in_force: 'day',
     order_class: 'bracket',
     take_profit: { limit_price: req.takeProfitPrice.toFixed(2) },

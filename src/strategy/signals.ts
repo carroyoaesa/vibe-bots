@@ -1,5 +1,5 @@
-import { sma, rsi, momentum } from './indicators';
-import { STRATEGY_PARAMS } from './config';
+import { sma, rsi, momentum, estimateEntryPrice } from './indicators';
+import { STRATEGY_PARAMS, RISK_PROFILE } from './config';
 
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD';
 
@@ -10,6 +10,8 @@ export interface SignalResult {
   smaSlow: number | null;
   rsi: number | null;
   momentum: number | null;
+  estimatedEntryPrice: number | null;
+  estimatedExitPrice: number | null;
   signal: SignalAction;
   reason: string;
 }
@@ -32,6 +34,8 @@ export function computeSignal(symbol: string, closes: number[]): SignalResult {
       smaSlow: null,
       rsi: null,
       momentum: null,
+      estimatedEntryPrice: null,
+      estimatedExitPrice: null,
       signal: 'HOLD',
       reason: 'Sin datos en market_bars (ejecutar npm run ingest primero)',
     };
@@ -53,10 +57,16 @@ export function computeSignal(symbol: string, closes: number[]): SignalResult {
       smaSlow,
       rsi: rsiValue,
       momentum: momentumValue,
+      estimatedEntryPrice: null,
+      estimatedExitPrice: null,
       signal: 'HOLD',
       reason: `Histórico insuficiente para SMA${smaSlowPeriod} (se requieren ${smaSlowPeriod + 1} cierres)`,
     };
   }
+
+  const estimatedEntryPrice = estimateEntryPrice(closes, smaFastPeriod, smaSlow);
+  // Precio objetivo de salida (take-profit) a partir del precio estimado de entrada.
+  const estimatedExitPrice = estimatedEntryPrice !== null ? estimatedEntryPrice * (1 + RISK_PROFILE.takeProfitPct) : null;
 
   const crossedUp = smaFastPrev <= smaSlowPrev && smaFast > smaSlow;
   const crossedDown = smaFastPrev >= smaSlowPrev && smaFast < smaSlow;
@@ -69,6 +79,8 @@ export function computeSignal(symbol: string, closes: number[]): SignalResult {
       smaSlow,
       rsi: rsiValue,
       momentum: momentumValue,
+      estimatedEntryPrice,
+      estimatedExitPrice,
       signal: 'BUY',
       reason: `SMA${smaFastPeriod} cruzó sobre SMA${smaSlowPeriod}, RSI=${rsiValue?.toFixed(1) ?? 'n/a'}, momentum=${momentumValue?.toFixed(2) ?? 'n/a'}%`,
     };
@@ -82,6 +94,8 @@ export function computeSignal(symbol: string, closes: number[]): SignalResult {
       smaSlow,
       rsi: rsiValue,
       momentum: momentumValue,
+      estimatedEntryPrice,
+      estimatedExitPrice,
       signal: 'SELL',
       reason: `SMA${smaFastPeriod} cruzó bajo SMA${smaSlowPeriod}`,
     };
@@ -94,6 +108,8 @@ export function computeSignal(symbol: string, closes: number[]): SignalResult {
     smaSlow,
     rsi: rsiValue,
     momentum: momentumValue,
+    estimatedEntryPrice,
+    estimatedExitPrice,
     signal: 'HOLD',
     reason: 'Sin cruce de medias móviles',
   };

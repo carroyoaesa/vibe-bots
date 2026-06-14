@@ -6,7 +6,14 @@ import { runIngest } from './ingestRunner';
 import { runTradingCycle } from './tradingRunner';
 import { createPostgresPool } from './services/db';
 import { createAlpacaClient, getAccount, getPositions } from './services/alpaca';
-import { getLatestSignals, getRecentOrders } from './services/tradingStore';
+import { getRecentOrders } from './services/tradingStore';
+import { getRecentBars, getCloses } from './services/marketStore';
+import { buildChartSeries } from './strategy/chart';
+import { computeSignal } from './strategy/signals';
+import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
+
+const CHART_LOOKBACK_BARS = 90;
+const SIGNAL_CLOSES_LOOKBACK = 60;
 
 const config = loadWebConfig();
 const app = express();
@@ -35,14 +42,43 @@ app.get('/api/trading/status', async (_req, res) => {
   const alpacaClient = createAlpacaClient(loadAlpacaConfig());
 
   try {
-    const [account, positions, signals, orders] = await Promise.all([
+    const [account, positions, orders] = await Promise.all([
       getAccount(alpacaClient),
       getPositions(alpacaClient),
-      getLatestSignals(pool),
       getRecentOrders(pool, 20),
     ]);
 
+    const signals = await Promise.all(
+      WATCHLIST.map(async (symbol) => {
+        const closes = await getCloses(pool, symbol, SIGNAL_CLOSES_LOOKBACK);
+        const signal = computeSignal(symbol, closes);
+        return { ...signal, type: ETF_SYMBOLS.includes(symbol) ? ('ETF' as const) : ('STOCK' as const) };
+      })
+    );
+
     res.json({ ok: true, generatedAt: new Date().toISOString(), account, positions, signals, orders });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/trading/chart/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+
+  if (!WATCHLIST.includes(symbol)) {
+    res.status(404).json({ ok: false, error: `Símbolo no soportado: ${symbol}` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    const bars = await getRecentBars(pool, symbol, CHART_LOOKBACK_BARS);
+    const points = buildChartSeries(bars);
+
+    res.json({ ok: true, symbol, points });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

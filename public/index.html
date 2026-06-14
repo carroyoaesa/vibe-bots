@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Vibe Bots - Dashboard</title>
   <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
   <header>
@@ -50,15 +51,39 @@
 
       <div id="trading-account" class="muted"></div>
 
-      <h3>Señales actuales</h3>
+      <h3>ETFs</h3>
+      <p class="muted">Ordenados de más a menos atractivos según señal, momentum, RSI y tendencia SMA10/SMA30.</p>
       <div class="table-wrap">
-        <table id="signals-table">
+        <table id="signals-table-etf">
           <thead>
-            <tr><th>Símbolo</th><th>Precio</th><th>SMA10</th><th>SMA30</th><th>RSI</th><th>Mom.</th><th>Señal</th><th>Motivo</th></tr>
+            <tr>
+              <th>Símbolo</th><th>Precio</th><th>SMA10</th><th>SMA30</th><th>RSI</th><th>Mom.</th>
+              <th title="Precio al que el cierre de la próxima sesión haría que SMA10 alcance la SMA30 actual">Precio est. entrada</th>
+              <th title="Precio objetivo de take-profit: precio est. entrada + take-profit del perfil de riesgo">Precio est. salida</th>
+              <th>Señal</th><th>Motivo</th>
+            </tr>
           </thead>
           <tbody></tbody>
         </table>
       </div>
+      <div id="signal-charts-etf" class="chart-grid"></div>
+
+      <h3>Acciones</h3>
+      <p class="muted">Ordenadas de más a menos atractivas según señal, momentum, RSI y tendencia SMA10/SMA30.</p>
+      <div class="table-wrap">
+        <table id="signals-table-stock">
+          <thead>
+            <tr>
+              <th>Símbolo</th><th>Precio</th><th>SMA10</th><th>SMA30</th><th>RSI</th><th>Mom.</th>
+              <th title="Precio al que el cierre de la próxima sesión haría que SMA10 alcance la SMA30 actual">Precio est. entrada</th>
+              <th title="Precio objetivo de take-profit: precio est. entrada + take-profit del perfil de riesgo">Precio est. salida</th>
+              <th>Señal</th><th>Motivo</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="signal-charts-stock" class="chart-grid"></div>
 
       <h3>Posiciones abiertas</h3>
       <div class="table-wrap">

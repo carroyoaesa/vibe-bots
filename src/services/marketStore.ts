@@ -112,6 +112,24 @@ export async function getCloses(pool: Pool, symbol: string, limit: number): Prom
   return result.rows.map((row) => Number(row.close)).reverse();
 }
 
+export interface RecentBar {
+  ts: string;
+  close: number;
+}
+
+/** Bars diarias (fecha + cierre) de un símbolo, en orden ascendente por fecha. */
+export async function getRecentBars(pool: Pool, symbol: string, limit: number): Promise<RecentBar[]> {
+  const result = await pool.query<{ ts: string; close: string }>(
+    `SELECT ts, close FROM market_bars
+     WHERE symbol = $1 AND timeframe = '1Day'
+     ORDER BY ts DESC
+     LIMIT $2`,
+    [symbol, limit]
+  );
+
+  return result.rows.map((row) => ({ ts: row.ts, close: Number(row.close) })).reverse();
+}
+
 export async function saveMacroObservations(pool: Pool, observations: MacroObservation[]): Promise<void> {
   for (const obs of observations) {
     await pool.query(

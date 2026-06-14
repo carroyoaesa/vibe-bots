@@ -33,13 +33,16 @@ export async function getDailyBars(client: AxiosInstance, symbols: string[], day
   const start = new Date();
   start.setDate(start.getDate() - days);
 
+  // El parámetro "limit" es el total de barras de TODA la respuesta (suma de todos los
+  // símbolos), no por símbolo. Se usa el máximo permitido por Alpaca para evitar que
+  // el watchlist se trunque alfabéticamente cuando hay muchos símbolos.
   const { data } = await client.get('/v2/stocks/bars', {
     params: {
       symbols: symbols.join(','),
       timeframe: '1Day',
       start: start.toISOString().slice(0, 10),
       feed: 'iex',
-      limit: 1000,
+      limit: 10000,
     },
   });
 

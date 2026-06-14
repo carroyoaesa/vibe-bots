@@ -17,6 +17,9 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
     )
   `);
 
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS estimated_entry_price NUMERIC`);
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS estimated_exit_price NUMERIC`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS trading_orders (
       id SERIAL PRIMARY KEY,
@@ -37,8 +40,8 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
 
 export async function saveSignal(pool: Pool, signal: SignalResult): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, signal, reason)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING id`,
     [
       signal.symbol,
@@ -47,6 +50,8 @@ export async function saveSignal(pool: Pool, signal: SignalResult): Promise<numb
       signal.smaSlow,
       signal.rsi,
       signal.momentum,
+      signal.estimatedEntryPrice,
+      signal.estimatedExitPrice,
       signal.signal,
       signal.reason,
     ]
@@ -96,13 +101,15 @@ export interface LatestSignalRow {
   smaSlow: number | null;
   rsi: number | null;
   momentum: number | null;
+  estimatedEntryPrice: number | null;
+  estimatedExitPrice: number | null;
   signal: string;
   reason: string;
 }
 
 export async function getLatestSignals(pool: Pool): Promise<LatestSignalRow[]> {
   const result = await pool.query(`
-    SELECT DISTINCT ON (symbol) symbol, ts, price, sma_fast, sma_slow, rsi, momentum, signal, reason
+    SELECT DISTINCT ON (symbol) symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason
     FROM trading_signals
     ORDER BY symbol, ts DESC
   `);
@@ -115,6 +122,8 @@ export async function getLatestSignals(pool: Pool): Promise<LatestSignalRow[]> {
     smaSlow: row.sma_slow !== null ? Number(row.sma_slow) : null,
     rsi: row.rsi !== null ? Number(row.rsi) : null,
     momentum: row.momentum !== null ? Number(row.momentum) : null,
+    estimatedEntryPrice: row.estimated_entry_price !== null ? Number(row.estimated_entry_price) : null,
+    estimatedExitPrice: row.estimated_exit_price !== null ? Number(row.estimated_exit_price) : null,
     signal: row.signal,
     reason: row.reason,
   }));

@@ -50,3 +50,27 @@ export function momentum(closes: number[], period: number): number | null {
 
   return ((current - past) / past) * 100;
 }
+
+/** Serie de SMA alineada con `values` (null en los puntos sin suficiente historial). */
+export function smaSeries(values: number[], period: number): (number | null)[] {
+  return values.map((_, index) => sma(values.slice(0, index + 1), period));
+}
+
+/** Serie de RSI alineada con `values` (null en los puntos sin suficiente historial). */
+export function rsiSeries(values: number[], period: number): (number | null)[] {
+  return values.map((_, index) => rsi(values.slice(0, index + 1), period));
+}
+
+/**
+ * Estima el cierre de la próxima sesión que haría que la SMA rápida alcance el
+ * valor actual de `smaSlow` (aproximación de "precio de entrada" para un cruce
+ * alcista, asumiendo que la SMA lenta no cambia significativamente con un dato nuevo).
+ */
+export function estimateEntryPrice(closes: number[], fastPeriod: number, smaSlow: number | null): number | null {
+  if (smaSlow === null || closes.length < fastPeriod) return null;
+
+  const previousCloses = closes.slice(-fastPeriod, -1);
+  const sumPrevious = previousCloses.reduce((acc, value) => acc + value, 0);
+
+  return fastPeriod * smaSlow - sumPrevious;
+}
