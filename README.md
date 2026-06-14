@@ -35,7 +35,9 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - `npm start` - ejecutar el bot compilado
 - `npm run dev` - ejecutar diagnóstico completo con `ts-node`
 - `npm run ingest` - ejecutar la ingesta de datos de mercado (Fase 1)
-- `npm run web` - levantar el dashboard web (Fase 1.5) en `http://0.0.0.0:4000`
+- `npm run web` - levantar el dashboard web (Fase 1.5) en primer plano, en `http://0.0.0.0:4000`
+- `npm run web:start` / `npm run web:stop` - levantar/detener el dashboard web en background (ver `scripts/`)
+- `npm run status` - ver el estado de los servicios nativos (Postgres/Redis/MinIO/Grafana) y del dashboard web
 
 ## Configuración local
 
@@ -118,6 +120,16 @@ El frontend (`public/index.html`, `public/app.js`, `public/styles.css`):
 - Embebe el dashboard "Vibe Bots - Overview" de Grafana vía `<iframe>`, usando la URL de `GRAFANA_PUBLIC_URL`.
 
 `src/diagnostics.ts` y `src/ingestRunner.ts` son los módulos compartidos: `src/index.ts` (CLI) y `src/ingest.ts` (CLI) son ahora wrappers delgados sobre ellos, para que la CLI y el dashboard web ejecuten exactamente la misma lógica.
+
+### Levantar/parar el dashboard web
+
+PostgreSQL, Redis, MinIO y Grafana ya corren como servicios nativos (systemd) con autostart. El dashboard web de Vibe Bots **no** está configurado como servicio systemd (decisión deliberada, para no agregar autostart a nivel de sistema sin pedirlo explícitamente); se maneja con scripts simples:
+
+- `npm run web:start` (o `./scripts/start-web.sh`) - lo levanta en background con `nohup`, guarda el PID en `run/web.pid` y los logs en `logs/web.log`.
+- `npm run web:stop` (o `./scripts/stop-web.sh`) - lo detiene usando `run/web.pid`.
+- `npm run status` (o `./scripts/status.sh`) - muestra el estado de los servicios nativos y si el dashboard web está arriba (con un check a `/api/health`).
+
+> Si reinicias la instancia, los servicios nativos vuelven solos pero el dashboard web hay que volver a levantarlo con `npm run web:start`.
 
 ## Grafana
 
