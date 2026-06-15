@@ -30,41 +30,52 @@ export interface DailyBar {
  * por eso se fija explícitamente feed=iex. `adjustment=split` evita discontinuidades
  * de precio (y por lo tanto señales falsas en SMA/RSI/momentum) cuando un símbolo
  * tiene un split dentro de la ventana de lookback.
+ *
+ * El parámetro "limit" es el total de barras de TODA la respuesta (suma de todos los
+ * símbolos), no por símbolo, y 10000 es el máximo permitido por Alpaca. Cuando
+ * `symbols.length * días hábiles` supera ese máximo (p.ej. backfill de 1095 días),
+ * la respuesta incluye `next_page_token` y hay que paginar para no truncar el
+ * histórico de los símbolos que se devuelven al final.
  */
 export async function getDailyBars(client: AxiosInstance, symbols: string[], days: number): Promise<DailyBar[]> {
   const start = new Date();
   start.setDate(start.getDate() - days);
 
-  // El parámetro "limit" es el total de barras de TODA la respuesta (suma de todos los
-  // símbolos), no por símbolo. Se usa el máximo permitido por Alpaca para evitar que
-  // el watchlist se trunque alfabéticamente cuando hay muchos símbolos.
-  const { data } = await client.get('/v2/stocks/bars', {
-    params: {
-      symbols: symbols.join(','),
-      timeframe: '1Day',
-      start: start.toISOString().slice(0, 10),
-      feed: 'iex',
-      adjustment: 'split',
-      limit: 10000,
-    },
-  });
-
   const bars: DailyBar[] = [];
-  for (const [symbol, symbolBars] of Object.entries<any[]>(data.bars || {})) {
-    for (const bar of symbolBars) {
-      bars.push({
-        symbol,
-        timestamp: bar.t,
-        open: bar.o,
-        high: bar.h,
-        low: bar.l,
-        close: bar.c,
-        volume: bar.v,
-        tradeCount: bar.n,
-        vwap: bar.vw,
-      });
+  let pageToken: string | undefined;
+
+  do {
+    const { data } = await client.get('/v2/stocks/bars', {
+      params: {
+        symbols: symbols.join(','),
+        timeframe: '1Day',
+        start: start.toISOString().slice(0, 10),
+        feed: 'iex',
+        adjustment: 'split',
+        limit: 10000,
+        page_token: pageToken,
+      },
+    });
+
+    for (const [symbol, symbolBars] of Object.entries<any[]>(data.bars || {})) {
+      for (const bar of symbolBars) {
+        bars.push({
+          symbol,
+          timestamp: bar.t,
+          open: bar.o,
+          high: bar.h,
+          low: bar.l,
+          close: bar.c,
+          volume: bar.v,
+          tradeCount: bar.n,
+          vwap: bar.vw,
+        });
+      }
     }
-  }
+
+    pageToken = data.next_page_token || undefined;
+  } while (pageToken);
+
   return bars;
 }
 
