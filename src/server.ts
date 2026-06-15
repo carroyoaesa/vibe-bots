@@ -17,19 +17,26 @@ import {
   ALPACA_POSITIONS_CACHE_TTL_SECONDS,
   ALPACA_OPEN_ORDERS_CACHE_KEY,
 } from './services/cache';
-import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals } from './services/tradingStore';
-import { getRecentOhlcBars } from './services/marketStore';
+import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals, getLatestHybridSignals } from './services/tradingStore';
+import { getRecentOhlcBars, getRecentOhlcBars1H } from './services/marketStore';
 import { createMarketDataClient, getAdjustedCloses } from './services/marketData';
 import { buildChartSeries } from './strategy/chart';
-import { computeSignal } from './strategy/signals';
+import { computeSignal, computeSignal1H } from './strategy/signals';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { RISK_PROFILE_PRESETS } from './strategy/config';
+import { HYBRID_CONFIG, TIER2_SYMBOLS, SHADOW_SYMBOLS, PARALLEL_RISK_PROFILE } from './strategy/hybridConfig';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
 import { runBacktestForWatchlist } from './backtestRunner';
 import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
 import { setupConditionSchema, getSymbolConditions } from './services/conditionStore';
+import { setupParallelSchema, getRecentParallelPositions } from './services/parallelStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
+
+// Velas 1H pedidas a `getRecentOhlcBars1H` para recalcular señales híbridas (Fase
+// híbrido, `strategy/hybridConfig.ts`) - mismo valor que `HOURLY_BARS_FOR_SIGNAL` en
+// `tradingRunner.ts`.
+const HOURLY_BARS_FOR_SIGNAL = 450;
 
 // Velas para el gráfico por símbolo: suficientes para que SMA50/EMA26/Donchian etc.
 // (los indicadores de mayor período entre las 12 condiciones) tengan ~100 puntos
@@ -71,10 +78,11 @@ app.get('/api/trading/status', async (_req, res) => {
   try {
     await setupSettingsSchema(pool);
     await setupConditionSchema(pool);
+    await setupParallelSchema(pool);
     const settings = await getSettings(pool);
     const symbolConditions = await getSymbolConditions(pool);
 
-    const [account, positions, orders, latestSignals, openOrdersCache] = await Promise.all([
+    const [account, positions, orders, latestSignals, latestHybridSignals, parallelPositions, openOrdersCache] = await Promise.all([
       // Cuenta y posiciones se cachean en Redis (TTLs cortos) y se comparten con el check
       // "alpaca" de /api/health y con runTradingCycle(), para no pedirle a Alpaca lo mismo
       // dos veces en cada poll de 60s del dashboard.
@@ -82,6 +90,10 @@ app.get('/api/trading/status', async (_req, res) => {
       getCachedOrFetch(redis, ALPACA_POSITIONS_CACHE_KEY, ALPACA_POSITIONS_CACHE_TTL_SECONDS, () => getPositions(alpacaClient)),
       getRecentOrders(pool, 20),
       getLatestSignals(pool),
+      // Fase híbrido: última señal 'parallel'/'shadow' (1H, Tier 2/SCHD) por símbolo.
+      getLatestHybridSignals(pool),
+      // Posiciones del sistema paralelo (Tier 2, abiertas y cerradas recientes).
+      getRecentParallelPositions(pool, 20),
       // Las órdenes abiertas solo se refrescan en runTradingCycle(); aquí se leen de caché
       // sin disparar una llamada extra a Alpaca (si no hay caché todavía, queda en null).
       getCachedJson<AlpacaOrder[]>(redis, ALPACA_OPEN_ORDERS_CACHE_KEY),
@@ -91,12 +103,22 @@ app.get('/api/trading/status', async (_req, res) => {
 
     const signals = await Promise.all(
       WATCHLIST.map(async (symbol) => {
-        const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
-        const pick = symbolConditions.get(symbol);
-        const buyConditionId = pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
-        const sellConditionId = pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
-        const signal = computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId);
+        const hybrid = HYBRID_CONFIG[symbol];
         const latest = latestBySymbol.get(symbol);
+
+        // Fase híbrido: Tier 1 (in-place, p.ej. SPY/XLU) recalcula su señal "main" con el
+        // combo 1H (`computeSignal1H`) en lugar de `symbol_conditions`/1D - igual rama que
+        // `tradingRunner.ts`, para que el dashboard muestre la misma señal que decide la
+        // posición real.
+        const signal = hybrid?.tier === 1
+          ? computeSignal1H(symbol, await getRecentOhlcBars1H(pool, symbol, HOURLY_BARS_FOR_SIGNAL), settings.riskProfile, hybrid.buyConditionId, hybrid.sellConditionId)
+          : computeSignal(
+              symbol,
+              await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK),
+              settings.riskProfile,
+              symbolConditions.get(symbol)?.buyConditionId ?? DEFAULT_CONDITION_ID,
+              symbolConditions.get(symbol)?.sellConditionId ?? DEFAULT_CONDITION_ID
+            );
 
         return {
           ...signal,
@@ -109,10 +131,29 @@ app.get('/api/trading/status', async (_req, res) => {
       })
     );
 
+    // Fase híbrido: señales 1H frescas para Tier 2 (paralelo, MS/QQQM) y SCHD (sombra),
+    // con overlay del último valor persistido igual que `signals` arriba.
+    const latestHybridBySymbol = new Map(latestHybridSignals.map((row) => [row.symbol, row]));
+    const hybridSignals = await Promise.all(
+      [...TIER2_SYMBOLS, ...SHADOW_SYMBOLS].map(async (symbol) => {
+        const hybrid = HYBRID_CONFIG[symbol];
+        const bars1h = await getRecentOhlcBars1H(pool, symbol, HOURLY_BARS_FOR_SIGNAL);
+        const signal = computeSignal1H(symbol, bars1h, PARALLEL_RISK_PROFILE, hybrid.buyConditionId, hybrid.sellConditionId);
+        const latest = latestHybridBySymbol.get(symbol);
+
+        return {
+          ...signal,
+          estimatedEntryPrice: latest?.estimatedEntryPrice ?? signal.estimatedEntryPrice,
+          estimatedExitPrice: latest?.estimatedExitPrice ?? signal.estimatedExitPrice,
+          system: hybrid.tier === 'shadow' ? ('shadow' as const) : ('parallel' as const),
+        };
+      })
+    );
+
     const openOrdersCount = openOrdersCache?.value.length ?? null;
     const openOrdersAt = openOrdersCache?.cachedAt ?? null;
 
-    res.json({ ok: true, generatedAt: new Date().toISOString(), account, positions, signals, orders, openOrdersCount, openOrdersAt });
+    res.json({ ok: true, generatedAt: new Date().toISOString(), account, positions, signals, hybridSignals, parallelPositions, orders, openOrdersCount, openOrdersAt });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

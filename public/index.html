@@ -203,6 +203,40 @@
 
     <section class="card">
       <div class="section-header">
+        <h2>Sistema híbrido (Tier 2 paralelo / sombra)</h2>
+      </div>
+      <p class="muted">
+        Fase híbrido: <strong>MS</strong> y <strong>QQQM</strong> corren además un sistema
+        paralelo (combo 1H, presupuesto de riesgo propio) que abre/cierra una porción
+        independiente de la posición de Alpaca de ese símbolo, sin afectar la posición
+        "main" (1D). <strong>SCHD</strong> corre en modo sombra: solo registra qué haría
+        el combo 1H, sin colocar órdenes. SPY y XLU ya usan su combo 1H directamente como
+        señal "main" (ver "Resumen de señales" arriba).
+      </p>
+
+      <h3>Señales híbridas (1H)</h3>
+      <div class="table-wrap">
+        <table id="hybrid-signals-table">
+          <thead>
+            <tr><th>Símbolo</th><th>Sistema</th><th>Señal</th><th>Precio</th><th>Cond. compra</th><th>Cond. venta</th><th>Motivo</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>Posiciones paralelas (Tier 2)</h3>
+      <div class="table-wrap">
+        <table id="parallel-positions-table">
+          <thead>
+            <tr><th>Símbolo</th><th>Cantidad</th><th>Precio entrada</th><th>Estado</th><th>Abierta</th><th>Cerrada</th><th>Precio salida</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
         <h2>Snapshots (MinIO)</h2>
         <div class="section-actions">
           <span id="snapshots-updated" class="muted"></span>

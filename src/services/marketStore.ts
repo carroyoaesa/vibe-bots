@@ -54,10 +54,19 @@ export async function setupIngestSchema(pool: Pool): Promise<void> {
 }
 
 export async function saveDailyBars(pool: Pool, bars: DailyBar[]): Promise<void> {
+  return saveBars(pool, bars, '1Day');
+}
+
+/** Igual que `saveDailyBars` pero `timeframe='1Hour'` (Fase híbrido, `strategy/hybridConfig.ts`). */
+export async function saveHourlyBars(pool: Pool, bars: DailyBar[]): Promise<void> {
+  return saveBars(pool, bars, '1Hour');
+}
+
+async function saveBars(pool: Pool, bars: DailyBar[], timeframe: '1Day' | '1Hour'): Promise<void> {
   for (const bar of bars) {
     await pool.query(
       `INSERT INTO market_bars (symbol, timeframe, ts, open, high, low, close, volume, trade_count, vwap)
-       VALUES ($1, '1Day', $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (symbol, timeframe, ts) DO UPDATE SET
          open = EXCLUDED.open,
          high = EXCLUDED.high,
@@ -66,7 +75,7 @@ export async function saveDailyBars(pool: Pool, bars: DailyBar[]): Promise<void>
          volume = EXCLUDED.volume,
          trade_count = EXCLUDED.trade_count,
          vwap = EXCLUDED.vwap`,
-      [bar.symbol, bar.timestamp, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.tradeCount, bar.vwap]
+      [bar.symbol, timeframe, bar.timestamp, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.tradeCount, bar.vwap]
     );
   }
 }
@@ -223,12 +232,21 @@ export async function getAllBars(pool: Pool, symbol: string): Promise<OhlcBar[]>
 
 /** Últimas `limit` velas diarias (OHLC) de un símbolo, en orden ascendente por fecha (Fase 6, multi-condicional). */
 export async function getRecentOhlcBars(pool: Pool, symbol: string, limit: number): Promise<OhlcBar[]> {
+  return getRecentOhlcBarsByTimeframe(pool, symbol, '1Day', limit);
+}
+
+/** Igual que `getRecentOhlcBars` pero `timeframe='1Hour'` (Fase híbrido, `strategy/hybridConfig.ts`). */
+export async function getRecentOhlcBars1H(pool: Pool, symbol: string, limit: number): Promise<OhlcBar[]> {
+  return getRecentOhlcBarsByTimeframe(pool, symbol, '1Hour', limit);
+}
+
+async function getRecentOhlcBarsByTimeframe(pool: Pool, symbol: string, timeframe: '1Day' | '1Hour', limit: number): Promise<OhlcBar[]> {
   const result = await pool.query(
     `SELECT ts, open, high, low, close FROM market_bars
-     WHERE symbol = $1 AND timeframe = '1Day'
+     WHERE symbol = $1 AND timeframe = $2
      ORDER BY ts DESC
-     LIMIT $2`,
-    [symbol, limit]
+     LIMIT $3`,
+    [symbol, timeframe, limit]
   );
 
   return result.rows

@@ -38,6 +38,19 @@ export interface DailyBar {
  * histórico de los símbolos que se devuelven al final.
  */
 export async function getDailyBars(client: AxiosInstance, symbols: string[], days: number): Promise<DailyBar[]> {
+  return fetchBars(client, symbols, days, '1Day');
+}
+
+/**
+ * Igual que `getDailyBars` pero `timeframe='1Hour'` (Fase híbrido, `strategy/hybridConfig.ts`).
+ * Mismo feed/adjustment (iex/split) que las velas diarias, para mantener consistencia
+ * con el histórico cacheado usado en el experimento `phase1_full20` (`bots/backtests`).
+ */
+export async function getHourlyBars(client: AxiosInstance, symbols: string[], days: number): Promise<DailyBar[]> {
+  return fetchBars(client, symbols, days, '1Hour');
+}
+
+async function fetchBars(client: AxiosInstance, symbols: string[], days: number, timeframe: '1Day' | '1Hour'): Promise<DailyBar[]> {
   const start = new Date();
   start.setDate(start.getDate() - days);
 
@@ -48,7 +61,7 @@ export async function getDailyBars(client: AxiosInstance, symbols: string[], day
     const { data } = await client.get('/v2/stocks/bars', {
       params: {
         symbols: symbols.join(','),
-        timeframe: '1Day',
+        timeframe,
         start: start.toISOString().slice(0, 10),
         feed: 'iex',
         adjustment: 'split',

@@ -13,10 +13,13 @@ import {
 } from './services/cache';
 import {
   getRecentOhlcBars,
+  getRecentOhlcBars1H,
   getLatestFundamentals,
   getRecentNewsForSymbol,
   getLatestMacroObservations,
+  saveHourlyBars,
 } from './services/marketStore';
+import { createMarketDataClient, getHourlyBars } from './services/marketData';
 import {
   createAlpacaClient,
   getAccount,
@@ -26,14 +29,17 @@ import {
   placeBuyOrder,
   cancelOrder,
   closePosition,
+  closePositionQty,
   AlpacaAccountSummary,
   AlpacaOrder,
 } from './services/alpaca';
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './services/tradingStore';
-import { computeSignal, SignalResult } from './strategy/signals';
+import { computeSignal, computeSignal1H, SignalResult } from './strategy/signals';
 import { DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
 import { setupConditionSchema, getSymbolConditions } from './services/conditionStore';
+import { setupParallelSchema, getOpenParallelPositions, openParallelPosition, closeParallelPosition } from './services/parallelStore';
+import { HYBRID_CONFIG, HYBRID_SYMBOLS, TIER2_SYMBOLS, SHADOW_SYMBOLS, PARALLEL_RISK_PROFILE } from './strategy/hybridConfig';
 import { WATCHLIST, ETF_SYMBOLS, MACRO_SERIES } from './watchlist';
 import { createAnthropicClient, assessWatchlist, SymbolAssessment, SymbolAssessmentContext } from './services/claude';
 
@@ -42,18 +48,36 @@ import { createAnthropicClient, assessWatchlist, SymbolAssessment, SymbolAssessm
 const BARS_LOOKBACK = 100;
 const NEWS_LOOKBACK = 5;
 
+// Fase híbrido (`strategy/hybridConfig.ts`): ventana de ingesta de velas 1H para los
+// 5 símbolos híbridos (~140 días hábiles * ~7 velas/día ≈ 980 velas, igual patrón que
+// `BARS_LOOKBACK`/`MIN_BARS` en 1D - cubre MIN_BARS_1H=401 con margen para warm-up de
+// indicadores y detección de cruces) y velas pedidas a `getRecentOhlcBars1H` para
+// `computeSignal1H`.
+const HOURLY_BARS_LOOKBACK_DAYS = 200;
+const HOURLY_BARS_FOR_SIGNAL = 450;
+
 export type TradingAction =
   | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number | null; stopLossPrice: number | null; alpacaOrderId: string }
   | { type: 'CLOSE_POSITION'; symbol: string; qty: number; alpacaOrderId?: string }
+  | { type: 'OPEN_PARALLEL_POSITION'; symbol: string; qty: number; alpacaOrderId: string }
+  | { type: 'CLOSE_PARALLEL_POSITION'; symbol: string; qty: number; alpacaOrderId?: string }
   | { type: 'AI_BLOCKED'; symbol: string; reason: string }
-  | { type: 'TRADING_DISABLED'; symbol: string }
-  | { type: 'NO_ACTION'; symbol: string; reason: string }
-  | { type: 'SKIPPED'; symbol: string; reason: string }
-  | { type: 'ERROR'; symbol: string; error: string };
+  | { type: 'TRADING_DISABLED'; symbol: string; system?: 'main' | 'parallel' }
+  | { type: 'NO_ACTION'; symbol: string; system?: 'main' | 'parallel' | 'shadow'; reason: string }
+  | { type: 'SKIPPED'; symbol: string; system?: 'main' | 'parallel' | 'shadow'; reason: string }
+  | { type: 'ERROR'; symbol: string; system?: 'main' | 'parallel' | 'shadow'; error: string };
+
+/** Señal 1H de Tier 2 (`parallel`, MS/QQQM) o de SCHD en modo sombra (`shadow`) - Fase híbrido. */
+export interface HybridSignalResult {
+  symbol: string;
+  system: 'parallel' | 'shadow';
+  signal: SignalResult;
+}
 
 export interface TradingCycleResult {
   account: AlpacaAccountSummary;
   signals: SignalResult[];
+  hybridSignals: HybridSignalResult[];
   actions: TradingAction[];
   snapshotKey: string | null;
 }
@@ -88,6 +112,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     await setupTradingSchema(pool);
     await setupSettingsSchema(pool);
     await setupConditionSchema(pool);
+    await setupParallelSchema(pool);
     const settings = await getSettings(pool);
     const symbolConditions = await getSymbolConditions(pool);
 
@@ -106,6 +131,18 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       console.warn('No se pudo refrescar la caché de Alpaca en Redis:', error instanceof Error ? error.message : error);
     });
 
+    // Fase híbrido (`strategy/hybridConfig.ts`): ingesta best-effort de velas 1H para los
+    // 5 símbolos híbridos (SPY, XLU, MS, QQQM, SCHD), reutilizando `market_bars` con
+    // timeframe='1Hour'. Si Alpaca falla, se loguea y el ciclo sigue con las velas 1H
+    // que ya hubiera en la DB (o señal "datos insuficientes" si no hay ninguna).
+    try {
+      const marketDataClient = createMarketDataClient(alpacaConfig);
+      const hourlyBars = await getHourlyBars(marketDataClient, HYBRID_SYMBOLS, HOURLY_BARS_LOOKBACK_DAYS);
+      await saveHourlyBars(pool, hourlyBars);
+    } catch (error) {
+      console.warn('No se pudieron actualizar las velas 1H (Fase híbrido):', error instanceof Error ? error.message : error);
+    }
+
     const positionsBySymbol = new Map(positions.map((p) => [p.symbol, p]));
     const openOrdersBySymbol = new Map<string, AlpacaOrder[]>();
     for (const order of openOrders) {
@@ -117,18 +154,39 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
     // Pasada 1: señales técnicas frescas para todo el watchlist (sin tocar la DB todavía),
     // así quedan disponibles para la fase de IA antes de guardar/ejecutar nada.
+    // Fase híbrido: los símbolos Tier 1 (refinamiento in-place, `HYBRID_CONFIG`) usan su
+    // combo 1H (`computeSignal1H`) en lugar de `symbol_conditions`/1D - esta señal
+    // REEMPLAZA la señal "main" de ese símbolo y fluye sin cambios por la Pasada 2.
     const signals: SignalResult[] = [];
     for (const symbol of WATCHLIST) {
-      const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
-      const pick = symbolConditions.get(symbol);
-      const buyConditionId = pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
-      const sellConditionId = pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
-      signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId));
+      const hybrid = HYBRID_CONFIG[symbol];
+      if (hybrid?.tier === 1) {
+        const bars1h = await getRecentOhlcBars1H(pool, symbol, HOURLY_BARS_FOR_SIGNAL);
+        signals.push(computeSignal1H(symbol, bars1h, settings.riskProfile, hybrid.buyConditionId, hybrid.sellConditionId));
+      } else {
+        const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
+        const pick = symbolConditions.get(symbol);
+        const buyConditionId = pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
+        const sellConditionId = pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
+        signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId));
+      }
+    }
+
+    // Pasada 1b (Fase híbrido): señales 1H adicionales para Tier 2 (sistema paralelo,
+    // MS/QQQM) y SCHD (modo sombra). No reemplazan la señal "main" de esos símbolos
+    // (calculada arriba en la Pasada 1 con su combo 1D habitual) - se persisten y, para
+    // Tier 2, se ejecutan por separado en la Pasada 2b. No pasan por la fase de IA.
+    const hybridSignals: HybridSignalResult[] = [];
+    for (const symbol of [...TIER2_SYMBOLS, ...SHADOW_SYMBOLS]) {
+      const hybrid = HYBRID_CONFIG[symbol];
+      const bars1h = await getRecentOhlcBars1H(pool, symbol, HOURLY_BARS_FOR_SIGNAL);
+      const signal = computeSignal1H(symbol, bars1h, PARALLEL_RISK_PROFILE, hybrid.buyConditionId, hybrid.sellConditionId);
+      hybridSignals.push({ symbol, system: hybrid.tier === 'shadow' ? 'shadow' : 'parallel', signal });
     }
 
     // Fase de IA (Claude): una sola evaluación batched del watchlist completo. Fail-open:
     // si falta ANTHROPIC_API_KEY o falla la llamada, se loguea y el ciclo sigue sin gating
-    // (igual que antes de la Fase 4).
+    // (igual que antes de la Fase 4). No se extiende a `hybridSignals` (Tier 2/sombra).
     let assessments = new Map<string, SymbolAssessment>();
     let assessmentModel: string | null = null;
     try {
@@ -201,7 +259,11 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           }
         }
 
-        const signalId = await saveSignal(pool, signal);
+        // Fase híbrido: Tier 1 (in-place, `HYBRID_CONFIG`) persiste su señal "main" con
+        // timeframe='1Hour' (combo 1H reemplaza al 1D para ese símbolo); el resto sigue
+        // con '1Day' como siempre.
+        const timeframe: '1Day' | '1Hour' = HYBRID_CONFIG[symbol]?.tier === 1 ? '1Hour' : '1Day';
+        const signalId = await saveSignal(pool, signal, 'main', timeframe);
 
         if (assessment && assessmentModel) {
           await saveAssessment(pool, {
@@ -334,6 +396,103 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       }
     }
 
+    // Pasada 2b (Fase híbrido): persistencia + ejecución de `hybridSignals` (Tier 2
+    // paralelo y SCHD sombra). Tier 2 (MS/QQQM) opera con su propio presupuesto de riesgo
+    // (`PARALLEL_RISK_PROFILE`) y su propia tabla `parallel_positions`, vendiendo solo su
+    // porción de la posición de Alpaca (`closePositionQty`) sin tocar la posición "main"
+    // del mismo símbolo. SCHD (sombra) solo guarda la señal, nunca coloca órdenes.
+    const openParallelPositions = await getOpenParallelPositions(pool);
+    const parallelPositionsBySymbol = new Map(openParallelPositions.map((p) => [p.symbol, p]));
+    let openParallelCount = openParallelPositions.length;
+
+    for (const { symbol, system, signal } of hybridSignals) {
+      try {
+        const signalId = await saveSignal(pool, signal, system, '1Hour');
+
+        if (system === 'shadow') {
+          actions.push({ type: 'NO_ACTION', symbol, system: 'shadow', reason: `Señal sombra (${signal.signal}): ${signal.reason}` });
+          continue;
+        }
+
+        if (!settings.tradingEnabled && signal.signal !== 'HOLD') {
+          actions.push({ type: 'TRADING_DISABLED', symbol, system: 'parallel' });
+          continue;
+        }
+
+        const openParallel = parallelPositionsBySymbol.get(symbol);
+
+        if (signal.signal === 'BUY') {
+          if (openParallel) {
+            actions.push({ type: 'NO_ACTION', symbol, system: 'parallel', reason: 'Ya existe una posición paralela abierta' });
+          } else if (openParallelCount >= PARALLEL_RISK_PROFILE.maxPositions) {
+            actions.push({ type: 'NO_ACTION', symbol, system: 'parallel', reason: `Máximo de posiciones paralelas alcanzado (${PARALLEL_RISK_PROFILE.maxPositions})` });
+          } else {
+            const positionValue = account.equity * PARALLEL_RISK_PROFILE.positionSizePct;
+            const qty = Math.floor(positionValue / signal.price);
+
+            if (qty < 1) {
+              actions.push({
+                type: 'SKIPPED',
+                symbol,
+                system: 'parallel',
+                reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${signal.price.toFixed(2)})`,
+              });
+            } else {
+              const entryPrice = signal.estimatedEntryPrice !== null
+                ? Math.min(signal.estimatedEntryPrice, signal.price)
+                : signal.price;
+
+              const order = await placeBuyOrder(alpacaClient, { symbol, qty, limitPrice: entryPrice });
+
+              await saveOrder(pool, {
+                signalId,
+                symbol,
+                side: 'buy',
+                qty,
+                orderType: 'simple',
+                alpacaOrderId: order.id,
+                status: order.status,
+                raw: order,
+                system: 'parallel',
+              });
+
+              await openParallelPosition(pool, { symbol, qty, entryPrice, openOrderId: order.id });
+
+              actions.push({ type: 'OPEN_PARALLEL_POSITION', symbol, qty, alpacaOrderId: order.id });
+              openParallelCount += 1;
+            }
+          }
+        } else if (signal.signal === 'SELL') {
+          if (!openParallel) {
+            actions.push({ type: 'NO_ACTION', symbol, system: 'parallel', reason: 'Sin posición paralela abierta para cerrar' });
+          } else {
+            const closeOrder = await closePositionQty(alpacaClient, symbol, openParallel.qty);
+
+            await saveOrder(pool, {
+              signalId,
+              symbol,
+              side: 'sell',
+              qty: openParallel.qty,
+              orderType: 'close_position_qty',
+              alpacaOrderId: closeOrder.id,
+              status: closeOrder.status,
+              raw: closeOrder,
+              system: 'parallel',
+            });
+
+            await closeParallelPosition(pool, openParallel.id, { exitPrice: signal.price, closeOrderId: closeOrder.id });
+
+            actions.push({ type: 'CLOSE_PARALLEL_POSITION', symbol, qty: openParallel.qty, alpacaOrderId: closeOrder.id });
+            openParallelCount -= 1;
+          }
+        } else {
+          actions.push({ type: 'NO_ACTION', symbol, system: 'parallel', reason: 'Señal HOLD' });
+        }
+      } catch (error) {
+        actions.push({ type: 'ERROR', symbol, system, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // Snapshot crudo del ciclo en MinIO (Fase 3) - no debe romper el ciclo de trading si falla.
     let snapshotKey: string | null = null;
     try {
@@ -344,6 +503,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         generatedAt: new Date().toISOString(),
         account,
         signals,
+        hybridSignals,
         actions,
         assessments: Array.from(assessments.values()),
       });
@@ -352,7 +512,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       console.error('No se pudo guardar el snapshot del ciclo de trading en MinIO:', error);
     }
 
-    return { account, signals, actions, snapshotKey };
+    return { account, signals, hybridSignals, actions, snapshotKey };
   } finally {
     await redis.quit();
     await pool.end();

@@ -27,6 +27,8 @@ const conditionsTableBody = document.querySelector('#conditions-table tbody');
 const conditionsTableNote = document.getElementById('conditions-table-note');
 const positionsTableBody = document.querySelector('#positions-table tbody');
 const ordersTableBody = document.querySelector('#orders-table tbody');
+const hybridSignalsTableBody = document.querySelector('#hybrid-signals-table tbody');
+const parallelPositionsTableBody = document.querySelector('#parallel-positions-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
 const tradeResult = document.getElementById('trade-result');
 const runBacktestBtn = document.getElementById('run-backtest');
@@ -764,6 +766,51 @@ function renderOrdersTable(orders) {
   });
 }
 
+function renderHybridSignalsTable(hybridSignals) {
+  hybridSignalsTableBody.innerHTML = '';
+  if (!hybridSignals || hybridSignals.length === 0) {
+    hybridSignalsTableBody.innerHTML = '<tr><td colspan="7" class="muted">Sin señales híbridas todavía.</td></tr>';
+    return;
+  }
+
+  hybridSignals.forEach((signal) => {
+    const tr = document.createElement('tr');
+    const systemLabel = signal.system === 'shadow' ? 'Sombra' : 'Paralelo';
+    tr.innerHTML = `
+      <td>${signal.symbol}</td>
+      <td>${systemLabel}</td>
+      <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
+      <td>${fmtMoney(signal.price)}</td>
+      <td>${conditionBadge(signal.buyConditionId, signal.buyConditionLabel)}</td>
+      <td>${conditionBadge(signal.sellConditionId, signal.sellConditionLabel)}</td>
+      <td class="muted">${signal.reason}</td>
+    `;
+    hybridSignalsTableBody.appendChild(tr);
+  });
+}
+
+function renderParallelPositionsTable(parallelPositions) {
+  parallelPositionsTableBody.innerHTML = '';
+  if (!parallelPositions || parallelPositions.length === 0) {
+    parallelPositionsTableBody.innerHTML = '<tr><td colspan="7" class="muted">Sin posiciones paralelas todavía.</td></tr>';
+    return;
+  }
+
+  parallelPositions.forEach((position) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${position.symbol}</td>
+      <td>${fmtNum(position.qty, 0)}</td>
+      <td>${fmtMoney(position.entryPrice)}</td>
+      <td>${position.status === 'open' ? 'Abierta' : 'Cerrada'}</td>
+      <td>${new Date(position.openedAt).toLocaleString()}</td>
+      <td>${position.closedAt ? new Date(position.closedAt).toLocaleString() : '—'}</td>
+      <td>${position.exitPrice !== null ? fmtMoney(position.exitPrice) : '—'}</td>
+    `;
+    parallelPositionsTableBody.appendChild(tr);
+  });
+}
+
 function renderBacktestingSummary(run) {
   if (!run) {
     backtestingPeriod.textContent = '';
@@ -950,7 +997,7 @@ async function loadSymbolReports() {
     const backtestingData = await backtestingRes.json();
     const conditionsData = await conditionsRes.json();
 
-    const { account, positions, signals, orders, openOrdersCount } = statusData;
+    const { account, positions, signals, hybridSignals, parallelPositions, orders, openOrdersCount } = statusData;
 
     const openOrdersText = typeof openOrdersCount === 'number'
       ? ` · Órdenes abiertas en Alpaca: ${openOrdersCount}`
@@ -986,6 +1033,8 @@ async function loadSymbolReports() {
 
     renderPositionsTable(positions);
     renderOrdersTable(orders);
+    renderHybridSignalsTable(hybridSignals);
+    renderParallelPositionsTable(parallelPositions);
   } catch (error) {
     tradingAccount.textContent = `Error al cargar resumen por símbolo: ${error}`;
   }

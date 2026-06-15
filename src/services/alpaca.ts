@@ -162,3 +162,16 @@ export async function closePosition(client: AxiosInstance, symbol: string) {
   const { data } = await client.delete(`/v2/positions/${symbol}`);
   return data;
 }
+
+/**
+ * Cierra (liquida a mercado) solo `qty` acciones de la posición de un símbolo, dejando
+ * el resto intacto. Usado por el sistema paralelo (Tier 2, `strategy/hybridConfig.ts`)
+ * para vender únicamente la cantidad trackeada en `parallel_positions` sin afectar la
+ * posición 1D del mismo símbolo.
+ */
+export async function closePositionQty(client: AxiosInstance, symbol: string, qty: number) {
+  const { data } = await client.delete(`/v2/positions/${symbol}`, {
+    params: { qty: qty.toString() },
+  });
+  return data;
+}

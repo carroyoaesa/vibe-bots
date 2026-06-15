@@ -28,6 +28,13 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
   await pool.query(`ALTER TABLE trading_signals DROP COLUMN IF EXISTS condition_id`);
   await pool.query(`ALTER TABLE trading_signals DROP COLUMN IF EXISTS condition_label`);
 
+  // Fase híbrido: 'system' distingue la señal principal ('main', 1D salvo Tier 1 in-place
+  // que pasa a 1H) de las del sistema paralelo ('parallel', Tier 2: MS/QQQM) y de
+  // logging-only ('shadow', SCHD); 'timeframe' indica si la señal se calculó sobre
+  // velas '1Day' o '1Hour' (`strategy/hybridConfig.ts`).
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS system TEXT NOT NULL DEFAULT 'main'`);
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS timeframe TEXT NOT NULL DEFAULT '1Day'`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS trading_orders (
       id SERIAL PRIMARY KEY,
@@ -44,6 +51,10 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
       raw JSONB
     )
   `);
+
+  // Fase híbrido: órdenes del sistema paralelo (Tier 2) se marcan 'parallel' para
+  // distinguirlas de las órdenes 'main' en el dashboard.
+  await pool.query(`ALTER TABLE trading_orders ADD COLUMN IF NOT EXISTS system TEXT NOT NULL DEFAULT 'main'`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ai_assessments (
@@ -62,10 +73,21 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
   await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_exit_price NUMERIC`);
 }
 
-export async function saveSignal(pool: Pool, signal: SignalResult): Promise<number> {
+/**
+ * `system`/`timeframe` (Fase híbrido, `strategy/hybridConfig.ts`): 'main' es la señal
+ * que decide la posición principal (1D para la mayoría, 1H para Tier 1 in-place);
+ * 'parallel'/'shadow' son señales adicionales de Tier 2/SCHD que conviven con la
+ * 'main' del mismo símbolo en el mismo ciclo.
+ */
+export async function saveSignal(
+  pool: Pool,
+  signal: SignalResult,
+  system: 'main' | 'parallel' | 'shadow' = 'main',
+  timeframe: '1Day' | '1Hour' = '1Day'
+): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label, system, timeframe)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      RETURNING id`,
     [
       signal.symbol,
@@ -82,6 +104,8 @@ export async function saveSignal(pool: Pool, signal: SignalResult): Promise<numb
       signal.buyConditionLabel,
       signal.sellConditionId,
       signal.sellConditionLabel,
+      system,
+      timeframe,
     ]
   );
 
@@ -99,13 +123,15 @@ export interface TradingOrderRecord {
   stopLossPrice?: number;
   status: string;
   raw?: unknown;
+  /** Fase híbrido: 'parallel' para órdenes del sistema paralelo (Tier 2, ver `strategy/hybridConfig.ts`). Default 'main'. */
+  system?: 'main' | 'parallel';
 }
 
 export async function saveOrder(pool: Pool, order: TradingOrderRecord): Promise<void> {
   await pool.query(
     `INSERT INTO trading_orders
-       (signal_id, symbol, side, qty, order_type, alpaca_order_id, take_profit_price, stop_loss_price, status, raw)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       (signal_id, symbol, side, qty, order_type, alpaca_order_id, take_profit_price, stop_loss_price, status, raw, system)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
     [
       order.signalId,
       order.symbol,
@@ -117,6 +143,7 @@ export async function saveOrder(pool: Pool, order: TradingOrderRecord): Promise<
       order.stopLossPrice ?? null,
       order.status,
       order.raw ? JSON.stringify(order.raw) : null,
+      order.system ?? 'main',
     ]
   );
 }
@@ -139,10 +166,16 @@ export interface LatestSignalRow {
   sellConditionLabel: string | null;
 }
 
+/**
+ * Solo `system='main'` (Fase híbrido): Tier 2/shadow guardan una fila adicional
+ * 'parallel'/'shadow' por símbolo en el mismo ciclo, que NO debe pisar la señal
+ * principal que ve `/api/trading/status`. Ver `getLatestHybridSignals`.
+ */
 export async function getLatestSignals(pool: Pool): Promise<LatestSignalRow[]> {
   const result = await pool.query(`
     SELECT DISTINCT ON (symbol) symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label
     FROM trading_signals
+    WHERE system = 'main'
     ORDER BY symbol, ts DESC
   `);
 
@@ -162,6 +195,41 @@ export async function getLatestSignals(pool: Pool): Promise<LatestSignalRow[]> {
     buyConditionLabel: row.buy_condition_label,
     sellConditionId: row.sell_condition_id,
     sellConditionLabel: row.sell_condition_label,
+  }));
+}
+
+export interface LatestHybridSignalRow extends LatestSignalRow {
+  system: 'parallel' | 'shadow';
+  timeframe: '1Hour';
+}
+
+/** Última señal 'parallel'/'shadow' (1H, Tier 2/SCHD) por símbolo, para el dashboard. */
+export async function getLatestHybridSignals(pool: Pool): Promise<LatestHybridSignalRow[]> {
+  const result = await pool.query(`
+    SELECT DISTINCT ON (symbol) symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label, system, timeframe
+    FROM trading_signals
+    WHERE system IN ('parallel', 'shadow')
+    ORDER BY symbol, ts DESC
+  `);
+
+  return result.rows.map((row) => ({
+    symbol: row.symbol,
+    ts: row.ts,
+    price: Number(row.price),
+    smaFast: row.sma_fast !== null ? Number(row.sma_fast) : null,
+    smaSlow: row.sma_slow !== null ? Number(row.sma_slow) : null,
+    rsi: row.rsi !== null ? Number(row.rsi) : null,
+    momentum: row.momentum !== null ? Number(row.momentum) : null,
+    estimatedEntryPrice: row.estimated_entry_price !== null ? Number(row.estimated_entry_price) : null,
+    estimatedExitPrice: row.estimated_exit_price !== null ? Number(row.estimated_exit_price) : null,
+    signal: row.signal,
+    reason: row.reason,
+    buyConditionId: row.buy_condition_id,
+    buyConditionLabel: row.buy_condition_label,
+    sellConditionId: row.sell_condition_id,
+    sellConditionLabel: row.sell_condition_label,
+    system: row.system,
+    timeframe: row.timeframe,
   }));
 }
 
