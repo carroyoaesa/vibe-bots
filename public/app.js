@@ -155,6 +155,14 @@ function fillRiskInputs(riskProfile) {
   riskMaxPositionsInput.value = riskProfile.maxPositions;
 }
 
+// "Sin bracket (solo señal)": TP/SL no se usan (la salida es solo por señal SELL),
+// así que se deshabilitan en el formulario aunque sigan enviándose al backend.
+function updateRiskInputsForPreset() {
+  const isSinBracket = riskPresetSelect.value === 'sin_bracket';
+  riskTakeProfitInput.disabled = isSinBracket;
+  riskStopLossInput.disabled = isSinBracket;
+}
+
 async function loadSettings() {
   try {
     const res = await fetch('/api/settings');
@@ -174,8 +182,9 @@ async function loadSettings() {
       claudeModelSelect.appendChild(option);
     });
 
-    riskPresetSelect.value = data.settings.riskPreset;
+    riskPresetSelect.value = data.settings.exitMode === 'signal_only' ? 'sin_bracket' : data.settings.riskPreset;
     fillRiskInputs(data.settings.riskProfile);
+    updateRiskInputsForPreset();
     claudeModelSelect.value = data.settings.claudeModel || data.models[0].id;
 
     renderTradingToggle(data.settings.tradingEnabled);
@@ -190,8 +199,9 @@ async function saveSettings() {
   saveSettingsBtn.disabled = true;
   settingsResult.textContent = 'Guardando...';
   try {
+    const isSinBracket = riskPresetSelect.value === 'sin_bracket';
     const body = {
-      riskPreset: riskPresetSelect.value,
+      riskPreset: isSinBracket ? 'personalizado' : riskPresetSelect.value,
       riskProfile: {
         positionSizePct: Number(riskPositionSizeInput.value) / 100,
         stopLossPct: Number(riskStopLossInput.value) / 100,
@@ -199,6 +209,7 @@ async function saveSettings() {
         maxPositions: Number(riskMaxPositionsInput.value),
       },
       claudeModel: claudeModelSelect.value,
+      exitMode: isSinBracket ? 'signal_only' : 'bracket',
     };
 
     const res = await fetch('/api/settings', {
@@ -255,9 +266,16 @@ function attractivenessScore(signal) {
 function renderSymbolStats(signal) {
   const stat = (label, value) => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>`;
 
+  const conditionStats = signal.buyConditionId === signal.sellConditionId
+    ? [stat('Condición activa', signal.buyConditionLabel ?? '—')]
+    : [
+        stat('Condición compra', signal.buyConditionLabel ?? '—'),
+        stat('Condición venta', signal.sellConditionLabel ?? '—'),
+      ];
+
   return [
     stat('Precio', fmtMoney(signal.price)),
-    stat('Condición activa', signal.conditionLabel ?? '—'),
+    ...conditionStats,
     stat('SMA10', fmtNum(signal.smaFast)),
     stat('SMA30', fmtNum(signal.smaSlow)),
     stat('RSI', fmtNum(signal.rsi)),
@@ -525,6 +543,29 @@ const CONDITION_CHART_CONFIG = {
   },
 };
 
+/**
+ * Combina los overlays de gráfico (Fase 6.1) de la condición de compra y la de venta
+ * (Fase 7) cuando son distintas: los overlays de precio (`price`) de ambas se
+ * concatenan (sin duplicar por `key`); el panel oscilador (`oscillator`) se toma de
+ * la condición de compra si define uno, o de la de venta si no.
+ */
+function mergeConditionChartConfig(buyConditionId, sellConditionId) {
+  const buyConfig = CONDITION_CHART_CONFIG[buyConditionId] ?? {};
+  if (buyConditionId === sellConditionId) return buyConfig;
+
+  const sellConfig = CONDITION_CHART_CONFIG[sellConditionId] ?? {};
+
+  const priceByKey = new Map();
+  [...(buyConfig.price ?? []), ...(sellConfig.price ?? [])].forEach((overlay) => {
+    if (!priceByKey.has(overlay.key)) priceByKey.set(overlay.key, overlay);
+  });
+
+  return {
+    price: Array.from(priceByKey.values()),
+    oscillator: buyConfig.oscillator ?? sellConfig.oscillator,
+  };
+}
+
 async function renderSymbolCharts(entries) {
   if (entries.length === 0) return;
 
@@ -559,7 +600,7 @@ async function renderSymbolCharts(entries) {
 
     const labels = result.points.map((point) => new Date(point.ts).toLocaleDateString());
     const closes = result.points.map((point) => point.close);
-    const chartConfig = CONDITION_CHART_CONFIG[signal.conditionId] ?? {};
+    const chartConfig = mergeConditionChartConfig(signal.buyConditionId, signal.sellConditionId);
 
     const datasets = [
       {
@@ -751,7 +792,8 @@ function renderBacktestingSummary(run) {
   conditionsTableNote.textContent =
     `Período del backtest: ${startDate} → ${endDate} (${trades.length} trades guardados en total). ` +
     `"Retorno total" es el retorno acumulado (compuesto) de todas las operaciones de esa condición durante ese período, ` +
-    `no el resultado de una sola operación. "Retorno prom." es el promedio por operación individual (columna "Trades").`;
+    `no el resultado de una sola operación. "Buy & Hold" es el retorno de comprar al inicio del período y mantener hasta el final, ` +
+    `con dividendos reinvertidos (precio ajustado por splits y dividendos). "Retorno prom." es el promedio por operación individual (columna "Trades").`;
 }
 
 /**
@@ -764,23 +806,26 @@ const SIGNALS_TABLE_COLUMNS = [
   { key: 'symbol', type: 'string', getValue: (s) => s.symbol },
   { key: 'type', type: 'string', getValue: (s) => s.type },
   { key: 'signal', type: 'string', getValue: (s) => s.signal },
-  { key: 'condition', type: 'string', getValue: (s) => s.conditionLabel ?? '' },
+  { key: 'buyCondition', type: 'string', getValue: (s) => s.buyConditionLabel ?? '' },
+  { key: 'sellCondition', type: 'string', getValue: (s) => s.sellConditionLabel ?? '' },
   { key: 'reason', type: 'string', getValue: (s) => s.reason ?? '' },
 ];
 
 const CONDITIONS_TABLE_COLUMNS = [
   { key: 'symbol', type: 'string', getValue: (c) => c.symbol },
-  { key: 'condition', type: 'string', getValue: (c) => c.conditionLabel },
+  { key: 'buyCondition', type: 'string', getValue: (c) => c.buyConditionLabel },
+  { key: 'sellCondition', type: 'string', getValue: (c) => c.sellConditionLabel },
   { key: 'trades', type: 'number', getValue: (c) => c.trades },
   { key: 'winRate', type: 'number', getValue: (c) => c.winRatePct },
   { key: 'totalReturn', type: 'number', getValue: (c) => c.totalReturnPct },
+  { key: 'buyHold', type: 'number', getValue: (c) => c.buyHoldReturnPct },
   { key: 'avgReturn', type: 'number', getValue: (c) => c.avgReturnPct },
   { key: 'maxDD', type: 'number', getValue: (c) => c.maxDrawdownPct },
   { key: 'updatedAt', type: 'number', getValue: (c) => (c.updatedAt ? new Date(c.updatedAt).getTime() : null) },
 ];
 
-// Orden inicial: "Resumen de señales" agrupado por Condición activa (a-z).
-const signalsSortState = { key: 'condition', direction: 'asc' };
+// Orden inicial: "Resumen de señales" agrupado por Condición de compra (a-z).
+const signalsSortState = { key: 'buyCondition', direction: 'asc' };
 const conditionsSortState = { key: null, direction: 'asc' };
 
 let latestSignals = [];
@@ -841,7 +886,7 @@ function setupSortableTable(tableId, sortState, onChange) {
 function renderSignalsSummaryTable() {
   signalsSummaryTableBody.innerHTML = '';
   if (latestSignals.length === 0) {
-    signalsSummaryTableBody.innerHTML = '<tr><td colspan="5" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+    signalsSummaryTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
   } else {
     const sorted = sortRows(latestSignals, SIGNALS_TABLE_COLUMNS, signalsSortState);
     sorted.forEach((signal) => {
@@ -850,7 +895,8 @@ function renderSignalsSummaryTable() {
         <td>${signal.symbol}</td>
         <td>${signal.type}</td>
         <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
-        <td>${conditionBadge(signal.conditionId, signal.conditionLabel)}</td>
+        <td>${conditionBadge(signal.buyConditionId, signal.buyConditionLabel)}</td>
+        <td>${conditionBadge(signal.sellConditionId, signal.sellConditionLabel)}</td>
         <td class="muted">${signal.reason}</td>
       `;
       signalsSummaryTableBody.appendChild(tr);
@@ -862,17 +908,19 @@ function renderSignalsSummaryTable() {
 function renderConditionsTable() {
   conditionsTableBody.innerHTML = '';
   if (latestConditions.length === 0) {
-    conditionsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
+    conditionsTableBody.innerHTML = '<tr><td colspan="10" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
   } else {
     const sorted = sortRows(latestConditions, CONDITIONS_TABLE_COLUMNS, conditionsSortState);
     sorted.forEach((c) => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${c.symbol}</td>
-        <td>${conditionBadge(c.conditionId, c.conditionLabel)}</td>
+        <td>${conditionBadge(c.buyConditionId, c.buyConditionLabel)}</td>
+        <td>${conditionBadge(c.sellConditionId, c.sellConditionLabel)}</td>
         <td>${c.trades}</td>
         <td>${c.winRatePct !== null ? `${fmtNum(c.winRatePct, 1)}%` : '—'}</td>
         <td class="${c.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(c.totalReturnPct)}%</td>
+        <td class="${c.buyHoldReturnPct !== null ? (c.buyHoldReturnPct >= 0 ? 'pl-positive' : 'pl-negative') : ''}">${c.buyHoldReturnPct !== null ? `${fmtNum(c.buyHoldReturnPct)}%` : '—'}</td>
         <td>${c.avgReturnPct !== null ? `${fmtNum(c.avgReturnPct)}%` : '—'}</td>
         <td>${fmtNum(c.maxDrawdownPct)}%</td>
         <td>${c.updatedAt ? new Date(c.updatedAt).toLocaleString() : '—'}</td>
@@ -1039,14 +1087,17 @@ tradingToggleBtn.addEventListener('click', toggleTradingEnabled);
 
 riskPresetSelect.addEventListener('change', () => {
   const preset = riskPresetSelect.value;
-  if (preset !== 'personalizado' && riskPresets[preset]) {
+  if (preset !== 'personalizado' && preset !== 'sin_bracket' && riskPresets[preset]) {
     fillRiskInputs(riskPresets[preset]);
   }
+  updateRiskInputsForPreset();
 });
 
 [riskPositionSizeInput, riskStopLossInput, riskTakeProfitInput, riskMaxPositionsInput].forEach((input) => {
   input.addEventListener('input', () => {
-    riskPresetSelect.value = 'personalizado';
+    if (riskPresetSelect.value !== 'sin_bracket') {
+      riskPresetSelect.value = 'personalizado';
+    }
   });
 });
 

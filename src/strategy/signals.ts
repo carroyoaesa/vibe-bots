@@ -14,8 +14,10 @@ export interface SignalResult {
   estimatedExitPrice: number | null;
   signal: SignalAction;
   reason: string;
-  conditionId: string;
-  conditionLabel: string;
+  buyConditionId: string;
+  buyConditionLabel: string;
+  sellConditionId: string;
+  sellConditionLabel: string;
 }
 
 // Mínimo de velas para que SMA50 (el indicador de mayor período entre las 12
@@ -23,20 +25,23 @@ export interface SignalResult {
 const MIN_BARS = 51;
 
 /**
- * Señal de trading para `symbol` según la condición de estado activa (Fase 6,
- * `symbol_conditions` -> `conditionId`, default `DEFAULT_CONDITION_ID`).
+ * Señal de trading para `symbol` según el par (condición de compra, condición de venta)
+ * activo (Fase 7, `symbol_conditions` -> `buyConditionId`/`sellConditionId`, default
+ * `DEFAULT_CONDITION_ID` para ambas).
  *
  * SMA10/SMA30/RSI14/Momentum10 se calculan siempre como contexto general (no
- * dependen de la condición activa) - se usan en el dashboard, `attractivenessScore`
+ * dependen de las condiciones activas) - se usan en el dashboard, `attractivenessScore`
  * y el contexto de IA, independientemente de qué condición genera la señal.
  */
 export function computeSignal(
   symbol: string,
   bars: OhlcBar[],
   riskProfile: RiskProfile = RISK_PROFILE,
-  conditionId: string = DEFAULT_CONDITION_ID
+  buyConditionId: string = DEFAULT_CONDITION_ID,
+  sellConditionId: string = DEFAULT_CONDITION_ID
 ): SignalResult {
-  const condition = CONDITIONS.find((c) => c.id === conditionId) ?? CONDITIONS[0];
+  const buyCondition = CONDITIONS.find((c) => c.id === buyConditionId) ?? CONDITIONS[0];
+  const sellCondition = CONDITIONS.find((c) => c.id === sellConditionId) ?? CONDITIONS[0];
 
   if (bars.length === 0) {
     return {
@@ -50,8 +55,10 @@ export function computeSignal(
       estimatedExitPrice: null,
       signal: 'HOLD',
       reason: 'Sin datos en market_bars (ejecutar npm run ingest primero)',
-      conditionId: condition.id,
-      conditionLabel: condition.label,
+      buyConditionId: buyCondition.id,
+      buyConditionLabel: buyCondition.label,
+      sellConditionId: sellCondition.id,
+      sellConditionLabel: sellCondition.label,
     };
   }
 
@@ -67,22 +74,37 @@ export function computeSignal(
       estimatedExitPrice: null,
       signal: 'HOLD',
       reason: `Histórico insuficiente para calcular indicadores (mínimo ${MIN_BARS} velas)`,
-      conditionId: condition.id,
-      conditionLabel: condition.label,
+      buyConditionId: buyCondition.id,
+      buyConditionLabel: buyCondition.label,
+      sellConditionId: sellCondition.id,
+      sellConditionLabel: sellCondition.label,
     };
   }
 
   const ctx = buildIndicatorContext(bars);
   const i = bars.length - 1;
 
-  const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, condition.id);
+  const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, buyCondition.id);
   const estimatedExitPrice = estimatedEntryPrice !== null ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct) : null;
 
-  const action = condition.evaluate(ctx, i);
-  const details = condition.describe(ctx, i);
-  const reason = action === 'HOLD'
-    ? `Sin señal (condición activa: "${condition.label}"; ${details})`
-    : `${action} por "${condition.label}" (${details})`;
+  const buyAction = buyCondition.evaluate(ctx, i);
+  const sellAction = sellCondition.evaluate(ctx, i);
+  const action: SignalAction = buyAction === 'BUY' ? 'BUY' : sellAction === 'SELL' ? 'SELL' : 'HOLD';
+
+  const sameCondition = buyCondition.id === sellCondition.id;
+  const buyDetails = buyCondition.describe(ctx, i);
+  const sellDetails = sameCondition ? buyDetails : sellCondition.describe(ctx, i);
+
+  let reason: string;
+  if (action === 'BUY') {
+    reason = `BUY por "${buyCondition.label}" (${buyDetails})`;
+  } else if (action === 'SELL') {
+    reason = `SELL por "${sellCondition.label}" (${sellDetails})`;
+  } else if (sameCondition) {
+    reason = `Sin señal (condición activa: "${buyCondition.label}"; ${buyDetails})`;
+  } else {
+    reason = `Sin señal (compra: "${buyCondition.label}" ${buyDetails}; venta: "${sellCondition.label}" ${sellDetails})`;
+  }
 
   return {
     symbol,
@@ -95,7 +117,9 @@ export function computeSignal(
     estimatedExitPrice,
     signal: action,
     reason,
-    conditionId: condition.id,
-    conditionLabel: condition.label,
+    buyConditionId: buyCondition.id,
+    buyConditionLabel: buyCondition.label,
+    sellConditionId: sellCondition.id,
+    sellConditionLabel: sellCondition.label,
   };
 }

@@ -23,6 +23,7 @@ import {
   getPositions,
   getOpenOrders,
   placeBracketBuyOrder,
+  placeBuyOrder,
   cancelOrder,
   closePosition,
   AlpacaAccountSummary,
@@ -42,7 +43,7 @@ const BARS_LOOKBACK = 100;
 const NEWS_LOOKBACK = 5;
 
 export type TradingAction =
-  | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number; stopLossPrice: number; alpacaOrderId: string }
+  | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number | null; stopLossPrice: number | null; alpacaOrderId: string }
   | { type: 'CLOSE_POSITION'; symbol: string; qty: number; alpacaOrderId?: string }
   | { type: 'AI_BLOCKED'; symbol: string; reason: string }
   | { type: 'TRADING_DISABLED'; symbol: string }
@@ -119,8 +120,10 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     const signals: SignalResult[] = [];
     for (const symbol of WATCHLIST) {
       const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
-      const conditionId = symbolConditions.get(symbol)?.conditionId ?? DEFAULT_CONDITION_ID;
-      signals.push(computeSignal(symbol, bars, settings.riskProfile, conditionId));
+      const pick = symbolConditions.get(symbol);
+      const buyConditionId = pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
+      const sellConditionId = pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
+      signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId));
     }
 
     // Fase de IA (Claude): una sola evaluación batched del watchlist completo. Fail-open:
@@ -152,8 +155,10 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
               momentum: signal.momentum,
               estimatedEntryPrice: signal.estimatedEntryPrice,
               estimatedExitPrice: signal.estimatedExitPrice,
-              conditionId: signal.conditionId,
-              conditionLabel: signal.conditionLabel,
+              buyConditionId: signal.buyConditionId,
+              buyConditionLabel: signal.buyConditionLabel,
+              sellConditionId: signal.sellConditionId,
+              sellConditionLabel: signal.sellConditionLabel,
               fundamentals,
               news: news.map((item) => ({
                 headline: item.headline,
@@ -244,32 +249,57 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
               const entryPrice = signal.estimatedEntryPrice !== null
                 ? Math.min(signal.estimatedEntryPrice, signal.price)
                 : signal.price;
-              const takeProfitPrice = entryPrice * (1 + settings.riskProfile.takeProfitPct);
-              const stopLossPrice = entryPrice * (1 - settings.riskProfile.stopLossPct);
 
-              const order = await placeBracketBuyOrder(alpacaClient, {
-                symbol,
-                qty,
-                limitPrice: entryPrice,
-                takeProfitPrice,
-                stopLossPrice,
-              });
+              if (settings.exitMode === 'signal_only') {
+                // Sin bracket: orden límite simple, sin TP/SL. La posición se cierra
+                // únicamente cuando la condición activa emite señal SELL (closePosition más abajo).
+                const order = await placeBuyOrder(alpacaClient, {
+                  symbol,
+                  qty,
+                  limitPrice: entryPrice,
+                });
 
-              await saveOrder(pool, {
-                signalId,
-                symbol,
-                side: 'buy',
-                qty,
-                orderType: 'bracket',
-                alpacaOrderId: order.id,
-                takeProfitPrice,
-                stopLossPrice,
-                status: order.status,
-                raw: order,
-              });
+                await saveOrder(pool, {
+                  signalId,
+                  symbol,
+                  side: 'buy',
+                  qty,
+                  orderType: 'simple',
+                  alpacaOrderId: order.id,
+                  status: order.status,
+                  raw: order,
+                });
 
-              actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice, stopLossPrice, alpacaOrderId: order.id });
-              openPositionsCount += 1;
+                actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id });
+                openPositionsCount += 1;
+              } else {
+                const takeProfitPrice = entryPrice * (1 + settings.riskProfile.takeProfitPct);
+                const stopLossPrice = entryPrice * (1 - settings.riskProfile.stopLossPct);
+
+                const order = await placeBracketBuyOrder(alpacaClient, {
+                  symbol,
+                  qty,
+                  limitPrice: entryPrice,
+                  takeProfitPrice,
+                  stopLossPrice,
+                });
+
+                await saveOrder(pool, {
+                  signalId,
+                  symbol,
+                  side: 'buy',
+                  qty,
+                  orderType: 'bracket',
+                  alpacaOrderId: order.id,
+                  takeProfitPrice,
+                  stopLossPrice,
+                  status: order.status,
+                  raw: order,
+                });
+
+                actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice, stopLossPrice, alpacaOrderId: order.id });
+                openPositionsCount += 1;
+              }
             }
           }
         } else if (signal.signal === 'SELL') {

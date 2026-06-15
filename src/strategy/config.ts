@@ -13,6 +13,11 @@ export interface RiskProfile {
   maxPositions: number;
 }
 
+// Fase A.1 (2026-06-15): modo de salida de las compras (bot_settings.exit_mode).
+// 'bracket' (default) = TP/SL del riskProfile activo; 'signal_only' = sin TP/SL,
+// solo señal SELL de la condición activa. Ver strategy/backtest.ts y tradingRunner.ts.
+export type ExitMode = 'bracket' | 'signal_only';
+
 // Perfil de riesgo "moderado" (Fase 2, default/semilla de bot_settings - Fase 5):
 // - 10% del equity por posición
 // - stop-loss -3% / take-profit +6% (ratio 2:1) vía bracket orders

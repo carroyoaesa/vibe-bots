@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { RISK_PROFILE, RiskProfile } from '../strategy/config';
+import { ExitMode, RISK_PROFILE, RiskProfile } from '../strategy/config';
 
 export async function setupSettingsSchema(pool: Pool): Promise<void> {
   await pool.query(`
@@ -24,6 +24,12 @@ export async function setupSettingsSchema(pool: Pool): Promise<void> {
   );
 
   await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS trading_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+
+  // Fase A.1 (2026-06-15): modo de salida de las compras. 'bracket' (default, comportamiento
+  // histórico) adjunta take-profit/stop-loss vía placeBracketBuyOrder. 'signal_only' coloca
+  // una orden simple (placeBuyOrder, sin TP/SL) y la posición se cierra únicamente cuando la
+  // condición activa emite señal SELL (closePosition en runTradingCycle, sin cambios).
+  await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS exit_mode TEXT NOT NULL DEFAULT 'bracket'`);
 }
 
 export interface BotSettings {
@@ -31,11 +37,12 @@ export interface BotSettings {
   riskProfile: RiskProfile;
   claudeModel: string | null;
   tradingEnabled: boolean;
+  exitMode: ExitMode;
 }
 
 export async function getSettings(pool: Pool): Promise<BotSettings> {
   const result = await pool.query(
-    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled
+    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, exit_mode
      FROM bot_settings WHERE id = 1`
   );
 
@@ -51,14 +58,15 @@ export async function getSettings(pool: Pool): Promise<BotSettings> {
     },
     claudeModel: row.claude_model,
     tradingEnabled: row.trading_enabled,
+    exitMode: row.exit_mode,
   };
 }
 
-export async function saveSettings(pool: Pool, settings: Pick<BotSettings, 'riskPreset' | 'riskProfile' | 'claudeModel'>): Promise<void> {
+export async function saveSettings(pool: Pool, settings: Pick<BotSettings, 'riskPreset' | 'riskProfile' | 'claudeModel' | 'exitMode'>): Promise<void> {
   await pool.query(
     `UPDATE bot_settings
      SET risk_preset = $1, position_size_pct = $2, stop_loss_pct = $3, take_profit_pct = $4,
-         max_positions = $5, claude_model = $6, updated_at = NOW()
+         max_positions = $5, claude_model = $6, exit_mode = $7, updated_at = NOW()
      WHERE id = 1`,
     [
       settings.riskPreset,
@@ -67,6 +75,7 @@ export async function saveSettings(pool: Pool, settings: Pick<BotSettings, 'risk
       settings.riskProfile.takeProfitPct,
       settings.riskProfile.maxPositions,
       settings.claudeModel,
+      settings.exitMode,
     ]
   );
 }

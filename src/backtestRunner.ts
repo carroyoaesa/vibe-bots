@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import { WATCHLIST } from './watchlist';
 import { getAllBars } from './services/marketStore';
-import { runBacktest, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
+import { runCombinedBacktest, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { saveBacktestRun } from './services/backtestStore';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
@@ -55,8 +55,10 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
       });
       picks.push({
         symbol,
-        conditionId: defaultCondition.id,
-        conditionLabel: defaultCondition.label,
+        buyConditionId: defaultCondition.id,
+        buyConditionLabel: defaultCondition.label,
+        sellConditionId: defaultCondition.id,
+        sellConditionLabel: defaultCondition.label,
         trades: 0,
         winRatePct: null,
         totalReturnPct: 0,
@@ -71,20 +73,25 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
     if (startDate === null || firstDate < startDate) startDate = firstDate;
     if (endDate === null || lastDate > endDate) endDate = lastDate;
 
-    // Corre las 12 condiciones con el motor real de vibe-bots (orden límite, fill solo si el
-    // low de la sesión siguiente toca el precio límite) y elige la de mayor retorno total
-    // entre las que operaron al menos una vez. Si ninguna operó, queda DEFAULT_CONDITION_ID
-    // (trades: 0) = comportamiento histórico.
-    let best: BacktestResult = runBacktest(symbol, bars, settings.riskProfile, defaultCondition.id);
-    let bestCondition = defaultCondition;
+    // Fase 7 (`bots/backtests/src/runComboMatrix.ts`): corre las 12x12=144 combinaciones de
+    // (condición de compra, condición de venta) con el motor real de vibe-bots (orden límite,
+    // fill solo si el low de la sesión siguiente toca el precio límite) y elige la de mayor
+    // retorno total entre las que operaron al menos una vez. Si ninguna operó, queda
+    // DEFAULT_CONDITION_ID para ambas (trades: 0) = comportamiento histórico.
+    let best: BacktestResult = runCombinedBacktest(symbol, bars, settings.riskProfile, defaultCondition.id, defaultCondition.id, settings.exitMode);
+    let bestBuyCondition = defaultCondition;
+    let bestSellCondition = defaultCondition;
 
-    for (const condition of CONDITIONS) {
-      if (condition.id === defaultCondition.id) continue;
+    for (const buyCondition of CONDITIONS) {
+      for (const sellCondition of CONDITIONS) {
+        if (buyCondition.id === defaultCondition.id && sellCondition.id === defaultCondition.id) continue;
 
-      const result = runBacktest(symbol, bars, settings.riskProfile, condition.id);
-      if (result.summary.trades > 0 && (best.summary.trades === 0 || result.summary.totalReturnPct > best.summary.totalReturnPct)) {
-        best = result;
-        bestCondition = condition;
+        const result = runCombinedBacktest(symbol, bars, settings.riskProfile, buyCondition.id, sellCondition.id, settings.exitMode);
+        if (result.summary.trades > 0 && (best.summary.trades === 0 || result.summary.totalReturnPct > best.summary.totalReturnPct)) {
+          best = result;
+          bestBuyCondition = buyCondition;
+          bestSellCondition = sellCondition;
+        }
       }
     }
 
@@ -92,8 +99,10 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
     trades.push(...best.trades);
     picks.push({
       symbol,
-      conditionId: bestCondition.id,
-      conditionLabel: bestCondition.label,
+      buyConditionId: bestBuyCondition.id,
+      buyConditionLabel: bestBuyCondition.label,
+      sellConditionId: bestSellCondition.id,
+      sellConditionLabel: bestSellCondition.label,
       trades: best.summary.trades,
       winRatePct: best.summary.winRate,
       totalReturnPct: best.summary.totalReturnPct,
@@ -140,7 +149,8 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
     params: {
       strategy: STRATEGY_PARAMS,
       risk: settings.riskProfile,
-      conditions: picks.map((p) => ({ symbol: p.symbol, conditionId: p.conditionId })),
+      exitMode: settings.exitMode,
+      conditions: picks.map((p) => ({ symbol: p.symbol, buyConditionId: p.buyConditionId, sellConditionId: p.sellConditionId })),
     },
     summary: { symbols: symbolSummaries, portfolio },
     trades: trades.map((trade) => ({

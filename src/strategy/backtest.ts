@@ -1,5 +1,5 @@
 import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, OhlcBar } from './conditions';
-import { RISK_PROFILE, RiskProfile } from './config';
+import { ExitMode, RISK_PROFILE, RiskProfile } from './config';
 
 export type BacktestExitReason = 'TP' | 'SL' | 'SELL_SIGNAL' | 'END_OF_DATA';
 
@@ -30,22 +30,32 @@ export interface BacktestResult {
 }
 
 /**
- * Simulación por símbolo de la condición de estado activa (Fase 6, `strategy/conditions.ts`)
- * sobre velas diarias (OHLC), en % de retorno por operación. Reutiliza las reglas de la
- * bracket order real:
- * - Entrada límite = min(estimatedEntryPrice, price), fill al día siguiente si
- *   el low de esa sesión toca el precio límite (si no, la orden no se llena).
- * - Salida por TP (+6%) o SL (-3%) según high/low diario (SL gana si ambos se
- *   tocan el mismo día), o por señal SELL de la misma condición al cierre de esa sesión.
+ * Simulación por símbolo de un par (condición de compra, condición de venta)
+ * (Fase 7, `strategy/conditions.ts`) sobre velas diarias (OHLC), en % de retorno
+ * por operación. Reutiliza las reglas de la orden real:
+ * - Entrada: señal BUY de `buyCondition`. Entrada límite = min(estimatedEntryPrice,
+ *   price) (proyectado con `buyCondition`), fill al día siguiente si el low de esa
+ *   sesión toca el precio límite (si no, la orden no se llena).
+ * - Salida (Fase A.1, `exitMode`):
+ *   - `'bracket'` (default): por TP (+`riskProfile.takeProfitPct`) o SL
+ *     (-`riskProfile.stopLossPct`) según high/low diario (SL gana si ambos se tocan
+ *     el mismo día), o por señal SELL de `sellCondition` al cierre de esa sesión.
+ *   - `'signal_only'`: sin TP/SL - solo por señal SELL de `sellCondition`.
  * - Si no hay salida antes de fin de datos, se marca a mercado (END_OF_DATA).
+ *
+ * Cuando `buyConditionId === sellConditionId` (caso `runBacktest`), el resultado
+ * es idéntico al motor de una sola condición (Fase 6).
  */
-export function runBacktest(
+export function runCombinedBacktest(
   symbol: string,
   bars: OhlcBar[],
   riskProfile: RiskProfile = RISK_PROFILE,
-  conditionId: string = DEFAULT_CONDITION_ID
+  buyConditionId: string = DEFAULT_CONDITION_ID,
+  sellConditionId: string = DEFAULT_CONDITION_ID,
+  exitMode: ExitMode = 'bracket'
 ): BacktestResult {
-  const condition = CONDITIONS.find((c) => c.id === conditionId) ?? CONDITIONS[0];
+  const buyCondition = CONDITIONS.find((c) => c.id === buyConditionId) ?? CONDITIONS[0];
+  const sellCondition = CONDITIONS.find((c) => c.id === sellConditionId) ?? CONDITIONS[0];
   const ctx = buildIndicatorContext(bars);
   const trades: BacktestTrade[] = [];
 
@@ -54,18 +64,18 @@ export function runBacktest(
   let i = 1;
 
   while (i < bars.length) {
-    const action = condition.evaluate(ctx, i);
+    const action = buyCondition.evaluate(ctx, i);
 
     if (action === 'BUY' && i + 1 < bars.length) {
-      const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, condition.id);
+      const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, buyCondition.id);
       const price = ctx.closes[i];
       const entryPrice = estimatedEntryPrice !== null ? Math.min(estimatedEntryPrice, price) : price;
 
       const fillDay = bars[i + 1];
 
       if (fillDay.low <= entryPrice) {
-        const takeProfitPrice = entryPrice * (1 + riskProfile.takeProfitPct);
-        const stopLossPrice = entryPrice * (1 - riskProfile.stopLossPct);
+        const takeProfitPrice = exitMode === 'bracket' ? entryPrice * (1 + riskProfile.takeProfitPct) : null;
+        const stopLossPrice = exitMode === 'bracket' ? entryPrice * (1 - riskProfile.stopLossPct) : null;
 
         let exitDate: string | null = null;
         let exitPrice: number | null = null;
@@ -75,7 +85,7 @@ export function runBacktest(
         for (let j = i + 1; j < bars.length; j++) {
           const day = bars[j];
 
-          if (day.low <= stopLossPrice) {
+          if (stopLossPrice !== null && day.low <= stopLossPrice) {
             exitDate = day.ts;
             exitPrice = stopLossPrice;
             exitReason = 'SL';
@@ -83,7 +93,7 @@ export function runBacktest(
             break;
           }
 
-          if (day.high >= takeProfitPrice) {
+          if (takeProfitPrice !== null && day.high >= takeProfitPrice) {
             exitDate = day.ts;
             exitPrice = takeProfitPrice;
             exitReason = 'TP';
@@ -91,7 +101,7 @@ export function runBacktest(
             break;
           }
 
-          if (condition.evaluate(ctx, j) === 'SELL') {
+          if (sellCondition.evaluate(ctx, j) === 'SELL') {
             exitDate = day.ts;
             exitPrice = day.close;
             exitReason = 'SELL_SIGNAL';
@@ -127,6 +137,17 @@ export function runBacktest(
   }
 
   return { trades, summary: summarizeTrades(symbol, trades) };
+}
+
+/** Caso particular de `runCombinedBacktest` con la misma condición para comprar y vender (Fase 6). */
+export function runBacktest(
+  symbol: string,
+  bars: OhlcBar[],
+  riskProfile: RiskProfile = RISK_PROFILE,
+  conditionId: string = DEFAULT_CONDITION_ID,
+  exitMode: ExitMode = 'bracket'
+): BacktestResult {
+  return runCombinedBacktest(symbol, bars, riskProfile, conditionId, conditionId, exitMode);
 }
 
 function summarizeTrades(symbol: string, trades: BacktestTrade[]): SymbolBacktestSummary {

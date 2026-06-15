@@ -19,6 +19,7 @@ import {
 } from './services/cache';
 import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals } from './services/tradingStore';
 import { getRecentOhlcBars } from './services/marketStore';
+import { createMarketDataClient, getAdjustedCloses } from './services/marketData';
 import { buildChartSeries } from './strategy/chart';
 import { computeSignal } from './strategy/signals';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
@@ -91,8 +92,10 @@ app.get('/api/trading/status', async (_req, res) => {
     const signals = await Promise.all(
       WATCHLIST.map(async (symbol) => {
         const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
-        const conditionId = symbolConditions.get(symbol)?.conditionId ?? DEFAULT_CONDITION_ID;
-        const signal = computeSignal(symbol, bars, settings.riskProfile, conditionId);
+        const pick = symbolConditions.get(symbol);
+        const buyConditionId = pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
+        const sellConditionId = pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
+        const signal = computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId);
         const latest = latestBySymbol.get(symbol);
 
         return {
@@ -155,6 +158,7 @@ app.post('/api/trading/run', async (_req, res) => {
 
 const VALID_RISK_PRESETS = ['conservador', 'moderado', 'agresivo', 'personalizado'];
 const VALID_CLAUDE_MODELS = CLAUDE_MODEL_OPTIONS.map((model) => model.id);
+const VALID_EXIT_MODES = ['bracket', 'signal_only'];
 
 app.get('/api/settings', async (_req, res) => {
   const pool = createPostgresPool(loadPostgresConfig());
@@ -175,6 +179,7 @@ app.post('/api/settings', async (req, res) => {
   const body = req.body ?? {};
   const { riskPreset, riskProfile } = body;
   const claudeModel = body.claudeModel ?? null;
+  const exitMode = body.exitMode ?? 'bracket';
 
   if (!VALID_RISK_PRESETS.includes(riskPreset)) {
     res.status(400).json({ ok: false, error: `riskPreset inválido: debe ser uno de ${VALID_RISK_PRESETS.join(', ')}.` });
@@ -201,6 +206,11 @@ app.post('/api/settings', async (req, res) => {
     return;
   }
 
+  if (!VALID_EXIT_MODES.includes(exitMode)) {
+    res.status(400).json({ ok: false, error: `exitMode inválido: debe ser uno de ${VALID_EXIT_MODES.join(', ')}.` });
+    return;
+  }
+
   const pool = createPostgresPool(loadPostgresConfig());
 
   try {
@@ -214,6 +224,7 @@ app.post('/api/settings', async (req, res) => {
         maxPositions: riskProfile.maxPositions,
       },
       claudeModel,
+      exitMode,
     });
 
     res.json({ ok: true, savedAt: new Date().toISOString() });
@@ -296,22 +307,55 @@ app.get('/api/conditions', async (_req, res) => {
 
   try {
     await setupConditionSchema(pool);
+    await setupBacktestSchema(pool);
     const symbolConditions = await getSymbolConditions(pool);
+    const latestRun = await getLatestBacktestRun(pool);
+
+    const periodStart = latestRun?.run.startDate ? new Date(latestRun.run.startDate).toISOString().slice(0, 10) : null;
+    const periodEnd = latestRun?.run.endDate ? new Date(latestRun.run.endDate).toISOString().slice(0, 10) : null;
+
+    // Buy & Hold (con dividendos reinvertidos, adjustment=all) sobre el mismo
+    // período del último backtest. Best-effort: si Alpaca falla, queda en null
+    // y el resto de /api/conditions sigue funcionando igual.
+    const buyHoldReturns = new Map<string, number>();
+    if (periodStart && periodEnd) {
+      try {
+        const marketDataClient = createMarketDataClient(loadAlpacaConfig());
+        const [startCloses, endCloses] = await Promise.all([
+          getAdjustedCloses(marketDataClient, WATCHLIST, periodStart),
+          getAdjustedCloses(marketDataClient, WATCHLIST, periodEnd),
+        ]);
+
+        for (const symbol of WATCHLIST) {
+          const startClose = startCloses.get(symbol);
+          const endClose = endCloses.get(symbol);
+          if (startClose !== undefined && endClose !== undefined) {
+            buyHoldReturns.set(symbol, ((endClose - startClose) / startClose) * 100);
+          }
+        }
+      } catch (error) {
+        console.warn('No se pudo calcular Buy & Hold con dividendos:', error instanceof Error ? error.message : error);
+      }
+    }
 
     const conditions = WATCHLIST.map((symbol) => {
       const row = symbolConditions.get(symbol);
-      const condition = CONDITIONS.find((c) => c.id === (row?.conditionId ?? DEFAULT_CONDITION_ID)) ?? CONDITIONS[0];
+      const buyCondition = CONDITIONS.find((c) => c.id === (row?.buyConditionId ?? DEFAULT_CONDITION_ID)) ?? CONDITIONS[0];
+      const sellCondition = CONDITIONS.find((c) => c.id === (row?.sellConditionId ?? DEFAULT_CONDITION_ID)) ?? CONDITIONS[0];
 
       return {
         symbol,
-        conditionId: row?.conditionId ?? condition.id,
-        conditionLabel: row?.conditionLabel ?? condition.label,
+        buyConditionId: row?.buyConditionId ?? buyCondition.id,
+        buyConditionLabel: row?.buyConditionLabel ?? buyCondition.label,
+        sellConditionId: row?.sellConditionId ?? sellCondition.id,
+        sellConditionLabel: row?.sellConditionLabel ?? sellCondition.label,
         trades: row?.trades ?? 0,
         winRatePct: row?.winRatePct ?? null,
         totalReturnPct: row?.totalReturnPct ?? 0,
         avgReturnPct: row?.avgReturnPct ?? null,
         maxDrawdownPct: row?.maxDrawdownPct ?? 0,
         updatedAt: row?.updatedAt ?? null,
+        buyHoldReturnPct: buyHoldReturns.get(symbol) ?? null,
       };
     });
 
@@ -320,6 +364,7 @@ app.get('/api/conditions', async (_req, res) => {
       generatedAt: new Date().toISOString(),
       conditions,
       catalog: CONDITIONS.map((c) => ({ id: c.id, label: c.label })),
+      buyHoldPeriod: periodStart && periodEnd ? { start: periodStart, end: periodEnd } : null,
     });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });

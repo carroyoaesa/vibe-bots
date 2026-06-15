@@ -79,6 +79,39 @@ export async function getDailyBars(client: AxiosInstance, symbols: string[], day
   return bars;
 }
 
+/**
+ * Cierre ajustado por splits Y dividendos (`adjustment=all`) del primer día de
+ * mercado en o después de `date`, para cada símbolo. A diferencia de `getDailyBars`
+ * (que usa `adjustment=split` para no introducir saltos de precio en los
+ * indicadores de `market_bars`), esto es solo para comparar contra "Buy & Hold con
+ * dividendos reinvertidos" sobre el período de un backtest (`/api/conditions`) -
+ * no se persiste ni afecta `market_bars`/indicadores.
+ */
+export async function getAdjustedCloses(client: AxiosInstance, symbols: string[], date: string): Promise<Map<string, number>> {
+  const end = new Date(`${date}T00:00:00Z`);
+  end.setUTCDate(end.getUTCDate() + 5);
+
+  const { data } = await client.get('/v2/stocks/bars', {
+    params: {
+      symbols: symbols.join(','),
+      timeframe: '1Day',
+      start: date,
+      end: end.toISOString().slice(0, 10),
+      feed: 'iex',
+      adjustment: 'all',
+      limit: 10000,
+    },
+  });
+
+  const closes = new Map<string, number>();
+  for (const [symbol, symbolBars] of Object.entries<any[]>(data.bars || {})) {
+    if (symbolBars.length > 0) {
+      closes.set(symbol, symbolBars[0].c);
+    }
+  }
+  return closes;
+}
+
 export interface NewsItem {
   id: number;
   headline: string;

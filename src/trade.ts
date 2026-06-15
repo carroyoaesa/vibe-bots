@@ -2,8 +2,12 @@ import { runTradingCycle } from './tradingRunner';
 
 function describeAction(action: Awaited<ReturnType<typeof runTradingCycle>>['actions'][number]): string {
   switch (action.type) {
-    case 'OPEN_POSITION':
-      return `🟢 BUY ${action.symbol}: ${action.qty} acciones (TP $${action.takeProfitPrice.toFixed(2)} / SL $${action.stopLossPrice.toFixed(2)}) - orden ${action.alpacaOrderId}`;
+    case 'OPEN_POSITION': {
+      const tpsl = action.takeProfitPrice !== null && action.stopLossPrice !== null
+        ? `TP $${action.takeProfitPrice.toFixed(2)} / SL $${action.stopLossPrice.toFixed(2)}`
+        : 'sin bracket TP/SL';
+      return `🟢 BUY ${action.symbol}: ${action.qty} acciones (${tpsl}) - orden ${action.alpacaOrderId}`;
+    }
     case 'CLOSE_POSITION':
       return `🔴 SELL ${action.symbol}: cierre de ${action.qty} acciones - orden ${action.alpacaOrderId ?? 'n/a'}`;
     case 'AI_BLOCKED':

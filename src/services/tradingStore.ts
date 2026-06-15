@@ -19,8 +19,14 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
 
   await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS estimated_entry_price NUMERIC`);
   await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS estimated_exit_price NUMERIC`);
-  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS condition_id TEXT`);
-  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS condition_label TEXT`);
+
+  // Fase 7: condición de compra y de venta separadas (antes una sola condition_id/condition_label).
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS buy_condition_id TEXT`);
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS buy_condition_label TEXT`);
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS sell_condition_id TEXT`);
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS sell_condition_label TEXT`);
+  await pool.query(`ALTER TABLE trading_signals DROP COLUMN IF EXISTS condition_id`);
+  await pool.query(`ALTER TABLE trading_signals DROP COLUMN IF EXISTS condition_label`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS trading_orders (
@@ -58,8 +64,8 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
 
 export async function saveSignal(pool: Pool, signal: SignalResult): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, condition_id, condition_label)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING id`,
     [
       signal.symbol,
@@ -72,8 +78,10 @@ export async function saveSignal(pool: Pool, signal: SignalResult): Promise<numb
       signal.estimatedExitPrice,
       signal.signal,
       signal.reason,
-      signal.conditionId,
-      signal.conditionLabel,
+      signal.buyConditionId,
+      signal.buyConditionLabel,
+      signal.sellConditionId,
+      signal.sellConditionLabel,
     ]
   );
 
@@ -125,13 +133,15 @@ export interface LatestSignalRow {
   estimatedExitPrice: number | null;
   signal: string;
   reason: string;
-  conditionId: string | null;
-  conditionLabel: string | null;
+  buyConditionId: string | null;
+  buyConditionLabel: string | null;
+  sellConditionId: string | null;
+  sellConditionLabel: string | null;
 }
 
 export async function getLatestSignals(pool: Pool): Promise<LatestSignalRow[]> {
   const result = await pool.query(`
-    SELECT DISTINCT ON (symbol) symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, condition_id, condition_label
+    SELECT DISTINCT ON (symbol) symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label
     FROM trading_signals
     ORDER BY symbol, ts DESC
   `);
@@ -148,8 +158,10 @@ export async function getLatestSignals(pool: Pool): Promise<LatestSignalRow[]> {
     estimatedExitPrice: row.estimated_exit_price !== null ? Number(row.estimated_exit_price) : null,
     signal: row.signal,
     reason: row.reason,
-    conditionId: row.condition_id,
-    conditionLabel: row.condition_label,
+    buyConditionId: row.buy_condition_id,
+    buyConditionLabel: row.buy_condition_label,
+    sellConditionId: row.sell_condition_id,
+    sellConditionLabel: row.sell_condition_label,
   }));
 }
 

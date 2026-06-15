@@ -85,6 +85,30 @@ export async function getOpenOrders(client: AxiosInstance, symbol?: string): Pro
   }));
 }
 
+export interface BuyOrderRequest {
+  symbol: string;
+  qty: number;
+  limitPrice: number;
+}
+
+/**
+ * Coloca una orden de compra límite simple (order_class=simple, sin take-profit/stop-loss).
+ * Usada cuando `bot_settings.exit_mode = 'signal_only'` (Fase A.1): la posición se cierra
+ * únicamente vía `closePosition` cuando la condición activa emite señal SELL.
+ */
+export async function placeBuyOrder(client: AxiosInstance, req: BuyOrderRequest) {
+  const { data } = await client.post('/v2/orders', {
+    symbol: req.symbol,
+    qty: req.qty.toString(),
+    side: 'buy',
+    type: 'limit',
+    limit_price: req.limitPrice.toFixed(2),
+    time_in_force: 'day',
+  });
+
+  return data;
+}
+
 export interface BracketBuyOrderRequest {
   symbol: string;
   qty: number;

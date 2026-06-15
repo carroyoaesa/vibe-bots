@@ -69,6 +69,7 @@
             <option value="moderado">Moderado</option>
             <option value="agresivo">Agresivo</option>
             <option value="personalizado">Personalizado</option>
+            <option value="sin_bracket">Sin bracket (solo señal)</option>
           </select>
         </label>
         <label class="form-field">
@@ -88,6 +89,12 @@
           <input type="number" id="risk-max-positions" min="1" max="20" step="1" />
         </label>
       </div>
+      <p class="muted">
+        "Sin bracket (solo señal)": las compras se hacen sin take-profit ni stop-loss
+        adjuntos; la posición se cierra únicamente cuando la condición activa emite una
+        señal de venta. El tamaño de posición y máx. posiciones siguen aplicando (se toman
+        del último preset numérico usado).
+      </p>
 
       <h3>Modelo de Claude (evaluación de IA)</h3>
       <div class="form-grid">
@@ -133,7 +140,8 @@
               <th data-sort-key="symbol">Símbolo</th>
               <th data-sort-key="type">Tipo</th>
               <th data-sort-key="signal">Señal</th>
-              <th data-sort-key="condition">Condición activa</th>
+              <th data-sort-key="buyCondition">Cond. compra</th>
+              <th data-sort-key="sellCondition">Cond. venta</th>
               <th data-sort-key="reason">Motivo</th>
             </tr>
           </thead>
@@ -148,10 +156,12 @@
           <thead>
             <tr>
               <th data-sort-key="symbol">Símbolo</th>
-              <th data-sort-key="condition">Condición</th>
+              <th data-sort-key="buyCondition">Cond. compra</th>
+              <th data-sort-key="sellCondition">Cond. venta</th>
               <th data-sort-key="trades">Trades</th>
               <th data-sort-key="winRate">Win rate</th>
               <th data-sort-key="totalReturn" title="Retorno acumulado (compuesto) de todas las operaciones de esa condición durante el período del backtest, no es por operación">Retorno total</th>
+              <th data-sort-key="buyHold" title="Retorno de comprar y mantener (Buy & Hold) durante el mismo período del backtest, con dividendos reinvertidos (precio ajustado por splits y dividendos de Alpaca)">Buy & Hold</th>
               <th data-sort-key="avgReturn" title="Retorno promedio de cada operación individual">Retorno prom.</th>
               <th data-sort-key="maxDD">Max DD</th>
               <th data-sort-key="updatedAt">Actualizado</th>

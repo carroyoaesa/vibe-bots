@@ -28,8 +28,10 @@ export interface SymbolAssessmentContext {
   momentum: number | null;
   estimatedEntryPrice: number | null;
   estimatedExitPrice: number | null;
-  conditionId: string;
-  conditionLabel: string;
+  buyConditionId: string;
+  buyConditionLabel: string;
+  sellConditionId: string;
+  sellConditionLabel: string;
   fundamentals: CompanyProfile | null;
   news: { headline: string; summary: string; publishedAt: string }[];
 }
@@ -98,9 +100,13 @@ function buildPrompt(symbols: SymbolAssessmentContext[], macro: MacroObservation
       ? s.news.map((item) => `  - (${item.publishedAt.slice(0, 10)}) ${item.headline}`).join('\n')
       : '  - Sin noticias recientes';
 
+    const conditionLine = s.buyConditionId === s.sellConditionId
+      ? `Condición activa: ${s.buyConditionLabel}`
+      : `Condición de compra: ${s.buyConditionLabel} | Condición de venta: ${s.sellConditionLabel}`;
+
     return [
       `### ${s.symbol} (${s.type})`,
-      `Señal técnica: ${s.signal} | Condición activa: ${s.conditionLabel} | Precio: ${s.price} | SMA10: ${s.smaFast ?? 'n/a'} | SMA30: ${s.smaSlow ?? 'n/a'} | RSI14: ${s.rsi ?? 'n/a'} | Momentum10: ${s.momentum ?? 'n/a'}%`,
+      `Señal técnica: ${s.signal} | ${conditionLine} | Precio: ${s.price} | SMA10: ${s.smaFast ?? 'n/a'} | SMA30: ${s.smaSlow ?? 'n/a'} | RSI14: ${s.rsi ?? 'n/a'} | Momentum10: ${s.momentum ?? 'n/a'}%`,
       `Precio est. entrada (algorítmico): ${s.estimatedEntryPrice ?? 'n/a'} | Precio est. salida (algorítmico): ${s.estimatedExitPrice ?? 'n/a'}`,
       `Fundamentales: ${fundamentals}`,
       'Noticias recientes:',
