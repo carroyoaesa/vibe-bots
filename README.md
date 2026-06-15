@@ -2,7 +2,7 @@
 
 Proyecto de bot trader en TypeScript diseñado para correr en una instancia LXD con servicios nativos.
 
-Estado actual: bot operativo de punta a punta - ingesta diaria de datos de mercado, generación de señales técnicas con un perfil de riesgo configurable (`bot_settings`), evaluación y ajuste de esas señales por Claude (Anthropic), ejecución automática de bracket orders en la cuenta paper de Alpaca (con un interruptor ON/OFF para bloquear órdenes desde el dashboard), backtesting de la estrategia, snapshots en MinIO y un dashboard web para monitoreo y configuración (Grafana corre por separado, ver sección "Grafana"). Ver "Flujo del bot" justo abajo para el recorrido completo, y "Próximas fases (mejoras propuestas)" al final para ideas de evolución.
+Estado actual: bot operativo de punta a punta - ingesta diaria de datos de mercado, estrategia **multi-condicional por símbolo** (cada símbolo opera con su propia condición técnica ganadora de un catálogo de 12, Fase 6) con un perfil de riesgo configurable (`bot_settings`), evaluación y ajuste de esas señales por Claude (Anthropic), ejecución automática de bracket orders en la cuenta paper de Alpaca (con un interruptor ON/OFF para bloquear órdenes desde el dashboard), backtesting de la estrategia, snapshots en MinIO y un dashboard web para monitoreo y configuración (Grafana corre por separado, ver sección "Grafana"). Ver "Flujo del bot" justo abajo para el recorrido completo, "Fase 6: estrategia multi-condicional por símbolo" para el detalle de las 12 condiciones, y "Próximas fases (mejoras propuestas)" al final para ideas de evolución.
 
 ## Flujo del bot (de los datos a una orden en Alpaca)
 
@@ -10,7 +10,7 @@ Cada ciclo de trading (`npm run trade`, `npm run trade:cron` o `POST /api/tradin
 
 1. **Datos** (ingesta previa, `npm run ingest`): bars diarias, noticias, fundamentales y series macro de los 20 símbolos del watchlist (`src/watchlist.ts`) ya están en PostgreSQL (`market_bars`, `news_items`, `fundamentals_snapshots`, `macro_series`).
 2. **Configuración activa**: `runTradingCycle()` lee en caliente `bot_settings` (`getSettings(pool)`) - perfil de riesgo (tamaño de posición, stop-loss, take-profit, máx. posiciones) y modelo de Claude a usar.
-3. **Señal técnica** (`computeSignal()` en `src/strategy/signals.ts`): para cada símbolo, calcula SMA10/SMA30/RSI(14)/momentum sobre los cierres almacenados y determina `BUY`/`SELL`/`HOLD`, junto con `estimatedEntryPrice`/`estimatedExitPrice` (este último usando el `takeProfitPct` del perfil de riesgo activo).
+3. **Señal técnica** (`computeSignal()` en `src/strategy/signals.ts`): para cada símbolo, evalúa su **condición técnica activa** (una de 12 condiciones clásicas de TA - ver "Fase 6: estrategia multi-condicional por símbolo" - asignada por `npm run backtest` y leída de `symbol_conditions`, con fallback a `sma_cross_10_30`) sobre las últimas `BARS_LOOKBACK` (100) velas OHLC, determinando `BUY`/`SELL`/`HOLD` junto con `estimatedEntryPrice`/`estimatedExitPrice` (este último usando el `takeProfitPct` del perfil de riesgo activo). SMA10/SMA30/RSI(14)/momentum se calculan siempre como contexto general, independientemente de la condición activa.
 4. **Evaluación de IA** (`assessWatchlist()` en `src/services/claude.ts`, una sola llamada a Claude por ciclo): para cada señal, Claude recibe el contexto técnico + precios estimados + fundamentales + noticias + macro, y devuelve `recommendation` (`buy`/`hold`/`avoid`), `score`, `confidence`, `rationale` y, opcionalmente, `adjustedEntryPrice`/`adjustedExitPrice`. Si esta llamada falla por cualquier motivo, el ciclo continúa sin ella (fail-open).
 5. **Ajuste de precios** (`applyPriceAdjustment()` en `src/tradingRunner.ts`): si Claude propuso precios ajustados y quedan dentro de ±10% del valor algorítmico (y `exit > entry`), sobrescriben `estimatedEntryPrice`/`estimatedExitPrice` antes de persistir la señal.
 6. **Gate de IA**: una señal `BUY` que ya pasó los chequeos de posición/orden pendiente/máximo de posiciones se bloquea (`AI_BLOCKED`, sin colocar orden) si `recommendation === 'avoid'`. La IA nunca convierte HOLD/SELL en BUY ni toca señales SELL.
@@ -55,7 +55,7 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - `npm run ingest` - ejecutar la ingesta de datos de mercado
 - `npm run trade` - ejecutar un ciclo de trading completo (paper): calcula señales, aplica el perfil de riesgo activo y coloca/cierra bracket orders en Alpaca paper
 - `npm run trade:cron` - como `npm run trade`, pero primero consulta `/v2/clock` de Alpaca y no hace nada si el mercado está cerrado. Pensado para cron (ver "Automatización" más abajo).
-- `npm run backtest` - corre el backtest de la estrategia sobre el histórico actual para los 20 símbolos del watchlist y persiste el resultado (ver "Backtesting" más abajo).
+- `npm run backtest` - corre las 12 condiciones de TA (Fase 6) sobre el histórico actual para los 20 símbolos del watchlist, elige la condición ganadora de cada símbolo y persiste el resultado (ver "Backtesting" y "Fase 6: estrategia multi-condicional por símbolo" más abajo).
 - `npm run backfill-history` - (opcional, una sola vez, no corrido aún) extiende el histórico de `market_bars` de ~150 a ~1095 días para backtests con más datos.
 - `npm run web` - levantar el dashboard web en primer plano, en `http://0.0.0.0:4000`
 - `npm run web:start` / `npm run web:stop` - levantar/detener el dashboard web en background (ver `scripts/`)
@@ -149,14 +149,16 @@ Además cachea en Redis el último quote de Finnhub por símbolo (`quote:<SYMBOL
 
 ### Estrategia (`src/strategy/`)
 
-- **Indicadores** (`indicators.ts`): SMA, RSI (versión simplificada, sin suavizado de Wilder), momentum (% de retorno) y `estimateEntryPrice`.
-- **Parámetros** (`config.ts`, `STRATEGY_PARAMS`): SMA rápida = 10, SMA lenta = 30, RSI(14) con umbral de sobrecompra 70, momentum a 10 periodos.
-- **Señales** (`signals.ts`, `computeSignal`) - cada `SignalResult` incluye:
-  - **BUY**: cruce alcista de SMA10 sobre SMA30 (golden cross), confirmado con RSI < 70 (no sobrecomprado) y momentum positivo.
-  - **SELL**: cruce bajista de SMA10 bajo SMA30 (death cross).
-  - **HOLD**: sin cruce, o sin suficiente histórico (`market_bars`) para calcular SMA30+1.
-  - **`estimatedEntryPrice`**: precio de cierre que haría que la SMA10 de la próxima sesión alcance la SMA30 actual (`estimateEntryPrice` en `indicators.ts`) - una aproximación de "precio justo de entrada" para un cruce alcista.
-  - **`estimatedExitPrice`**: `estimatedEntryPrice * (1 + riskProfile.takeProfitPct)` - precio objetivo de take-profit relativo a ese precio estimado de entrada (`riskProfile` viene de `bot_settings`, ver "Configuración dinámica" más abajo; default `RISK_PROFILE`). `null` cuando `estimatedEntryPrice` es `null` (histórico insuficiente).
+- **Indicadores** (`indicators.ts`): SMA, EMA, RSI (versión simplificada, sin suavizado de Wilder), MACD, Bandas de Bollinger, Estocástico, Williams %R, CCI, Canal de Donchian, momentum (% de retorno) y `estimateEntryPrice`.
+- **Condiciones** (`conditions.ts`): catálogo de 12 condiciones clásicas de TA (`CONDITIONS`) + `buildIndicatorContext(bars)` + `computeEstimatedEntryPrice(ctx, i, conditionId)` - ver "Fase 6: estrategia multi-condicional por símbolo" más abajo para el detalle completo.
+- **Parámetros** (`config.ts`, `STRATEGY_PARAMS`): SMA rápida = 10, SMA lenta = 30, RSI(14) con umbral de sobrecompra 70, momentum a 10 periodos - usados por la condición `sma_cross_10_30` (default/fallback).
+- **Señales** (`signals.ts`, `computeSignal(symbol, bars, riskProfile, conditionId)`) - cada `SignalResult` incluye:
+  - `signal: 'BUY' | 'SELL' | 'HOLD'` según `condition.evaluate(ctx, i)` de la **condición técnica activa** de ese símbolo (Fase 6, una de las 12 de `CONDITIONS`, con fallback `sma_cross_10_30`).
+  - `reason` (Fase 6.1, enriquecido con valores): `` `${signal} por "${condition.label}" (${details})` `` (BUY/SELL) o `` `Sin señal (condición activa: "${condition.label}"; ${details})` `` (HOLD), donde `details = condition.describe(ctx, i)` agrega los valores de indicador que justifican la señal (una implementación por condición en `conditions.ts`, formateados con `fmtVal`, `'n/a'` si `null`). Ejemplos: `` BUY por "Cruce MACD(12,26,9) / Señal" (MACD=1.234 Señal=0.987) ``, `` Sin señal (condición activa: "Reversión RSI(14) 30/70"; RSI14=58.30) ``.
+  - `conditionId`/`conditionLabel`: la condición evaluada, para persistencia/exposición.
+  - `smaFast`/`smaSlow`/`rsi`/`momentum` (SMA10/SMA30/RSI14/Momentum10): se calculan **siempre** como contexto general, independientemente de la condición activa.
+  - **`estimatedEntryPrice`**: para `sma_cross_10_30`/`sma_cross_20_50`, precio de cierre que haría que la SMA rápida de la próxima sesión alcance la SMA lenta actual (`estimateEntryPrice` en `indicators.ts`); para las otras 10 condiciones, el cierre actual (`price`) - ver "Fase 6" para el detalle.
+  - **`estimatedExitPrice`**: `estimatedEntryPrice * (1 + riskProfile.takeProfitPct)` - precio objetivo de take-profit relativo a ese precio estimado de entrada (`riskProfile` viene de `bot_settings`, ver "Configuración dinámica" más abajo; default `RISK_PROFILE`). `null` cuando `estimatedEntryPrice` es `null` (histórico insuficiente, < 51 velas).
   - Antes de guardarse, ambos precios (`estimatedEntryPrice`/`estimatedExitPrice`) pueden ser ajustados por la fase de IA (Claude) dentro de un margen de ±10% - ver "Configuración dinámica (`bot_settings`)" y "Capa de IA (Claude)" más abajo.
 
 ### Gestión de riesgo (`bot_settings`)
@@ -169,7 +171,7 @@ El perfil de riesgo activo (`positionSizePct`, `stopLossPct`, `takeProfitPct`, `
 
 ### Ciclo de trading (`runTradingCycle`)
 
-Para cada símbolo del watchlist: lee los últimos cierres (`getCloses`), calcula la señal con el perfil de riesgo activo (`bot_settings`), aplica el ajuste de precios de IA si corresponde y la persiste en `trading_signals`, y según la señal:
+Para cada símbolo del watchlist: lee las últimas `BARS_LOOKBACK` (100) velas OHLC (`getRecentOhlcBars`), resuelve su condición técnica activa (`symbol_conditions`, fallback `sma_cross_10_30`, Fase 6), calcula la señal con esa condición y el perfil de riesgo activo (`bot_settings`), aplica el ajuste de precios de IA si corresponde y la persiste en `trading_signals`, y según la señal:
 
 - **BUY**: si no hay posición ni orden pendiente para el símbolo y no se alcanzó el máximo de posiciones (`riskProfile.maxPositions`), calcula la cantidad (`equity * riskProfile.positionSizePct / precio actual`, mínimo 1 acción) y coloca una **bracket order de compra LÍMITE** (`type: 'limit'`) a `min(estimatedEntryPrice, precio actual)` (si el precio actual ya está por debajo del estimado, se usa el actual para no pagar de más), con `take_profit`/`stop_loss` calculados sobre ese mismo precio (`riskProfile.takeProfitPct` / `riskProfile.stopLossPct`). Si `estimatedEntryPrice` no está disponible, usa el precio de mercado actual.
 - **SELL**: si hay una posición abierta, cancela órdenes pendientes del símbolo y cierra la posición a mercado.
@@ -319,13 +321,70 @@ La subida a MinIO es **best-effort**: si falla (p.ej. MinIO caído), se loguea e
 
 ## Backtesting (`npm run backtest`)
 
-`src/strategy/backtest.ts` (lógica pura) simula la estrategia real - mismas reglas de entrada límite (`min(estimatedEntryPrice, price)`), TP +6%/SL -3% y verificación de fill al día siguiente vía high/low diario - sobre el histórico de `market_bars` de cada símbolo, de forma independiente (% de retorno por símbolo, sin modelar equity/cash compartido ni el cap de 5 posiciones - eso sería v2).
+`src/strategy/backtest.ts` (`runBacktest(symbol, bars, riskProfile, conditionId)`, lógica pura) simula la estrategia real para una condición de TA dada (Fase 6, ver "Fase 6: estrategia multi-condicional por símbolo" más abajo) - mismas reglas de entrada límite (`min(estimatedEntryPrice, price)`), TP/SL del perfil de riesgo activo y verificación de fill al día siguiente vía high/low diario - sobre el histórico de `market_bars` de cada símbolo, de forma independiente (% de retorno por símbolo, sin modelar equity/cash compartido ni el cap de posiciones - eso sería v2).
 
-- `src/backtestRunner.ts` (`runBacktestForWatchlist(pool)`): corre el backtest para los 20 símbolos del watchlist usando el perfil de riesgo activo de `bot_settings` (`params.risk` en `backtest_runs` refleja ese perfil, no `RISK_PROFILE`), agrega métricas de portafolio (nº de trades, retorno promedio, win rate promedio, mejor/peor símbolo por retorno total) y persiste todo vía `src/services/backtestStore.ts`.
+- `src/backtestRunner.ts` (`runBacktestForWatchlist(pool)`): para cada uno de los 20 símbolos del watchlist, corre `runBacktest` con las 12 condiciones de `CONDITIONS` usando el perfil de riesgo activo de `bot_settings` (`params.risk` en `backtest_runs` refleja ese perfil, no `RISK_PROFILE`), elige la condición ganadora (mayor `totalReturnPct` entre las que tuvieron al menos 1 trade) y la persiste en `symbol_conditions` (ver "Fase 6"); agrega métricas de portafolio (nº de trades, retorno promedio, win rate promedio, mejor/peor símbolo por retorno total, todo sobre las condiciones ganadoras) y persiste el resto vía `src/services/backtestStore.ts`.
 - `src/backtest.ts` (CLI, `npm run backtest`): imprime una tabla resumen por símbolo (trades, win rate, retorno total, retorno promedio, max drawdown) y el resumen de portafolio, y muestra el `runId` persistido.
 - `backtest_runs` (`id, run_at, symbols, start_date, end_date, params JSONB, summary JSONB`) y `backtest_trades` (`id, run_id` FK -> `backtest_runs`, `symbol, entry_date, entry_price, exit_date, exit_price, exit_reason, pnl_pct`) - creadas por `setupBacktestSchema`.
 - `POST /api/backtesting/run` ejecuta el backtest y lo persiste; `GET /api/backtesting/results` devuelve la última corrida (con sus trades). Sección "Backtesting" en el dashboard: período cubierto, tabla resumen por símbolo, resumen de portafolio y botón "Ejecutar backtest".
 - `npm run backfill-history` (opcional, una sola vez, no corrido aún): extiende `market_bars` de ~150 a ~1095 días (`BACKFILL_DAYS`) vía `getDailyBars` + `saveDailyBars` (upsert), para backtests con más historia. No afecta `BARS_LOOKBACK_DAYS=220` de la ingesta diaria normal.
+
+## Fase 6: estrategia multi-condicional por símbolo
+
+Desde Fase 6, cada símbolo del watchlist opera con su **propia condición técnica ganadora**, elegida de un catálogo de 12 condiciones clásicas de TA, en vez de una única estrategia SMA10/SMA30 global. La condición activa de cada símbolo se recalcula con `npm run backtest` y se persiste en `symbol_conditions`; `runTradingCycle()` y `GET /api/trading/status` la leen en caliente (sin caché), igual que `bot_settings`.
+
+### Catálogo de 12 condiciones (`src/strategy/conditions.ts`)
+
+| id | Condición | Tipo |
+| --- | --- | --- |
+| `sma_cross_10_30` | Cruce SMA10/SMA30 + RSI<70 + Momentum>0 (estrategia original de vibe-bots; **default/fallback**) | Tendencia |
+| `sma_cross_20_50` | Golden/Death Cross SMA20/SMA50 | Tendencia |
+| `ema_cross_12_26` | Cruce EMA12/EMA26 | Tendencia |
+| `macd_cross` | Cruce MACD(12,26,9) / línea de señal | Momentum |
+| `rsi_reversal_30_70` | RSI(14) sale de sobreventa (<30) / sobrecompra (>70) | Reversión |
+| `bollinger_reversion` | Rebote desde banda inferior hacia la media (Bollinger 20,2) | Reversión |
+| `bollinger_breakout` | Ruptura de banda superior (Bollinger 20,2) | Breakout |
+| `stochastic_cross` | Cruce %K/%D del Estocástico(14,3) en zonas extremas | Reversión |
+| `williams_r_reversal` | Williams %R(14) sale de zonas extremas (-80/-20) | Reversión |
+| `cci_reversal` | CCI(20) sale de zonas extremas (±100) | Reversión |
+| `donchian_breakout_20` | Ruptura de Canal de Donchian (máx. 20 / mín. 10) | Breakout |
+| `trend_pullback_sma50` | Precio sobre SMA50 + pullback de RSI sobre 40 | Tendencia+pullback |
+
+`buildIndicatorContext(bars: OhlcBar[])` calcula todos los indicadores necesarios para las 12 condiciones (SMA10/20/30/50, EMA12/26, RSI14, MACD+señal, Bandas de Bollinger 20±2, Estocástico %K/%D, Williams %R, CCI20, canal de Donchian máx20/mín10, momentum10) a partir de `OhlcBar = {ts, open, high, low, close}`; cada `Condition` de `CONDITIONS` implementa `evaluate(ctx, i): 'BUY' | 'SELL' | 'HOLD'`. Estas funciones fueron portadas con el mismo comportamiento desde `/root/bots/backtests` (proyecto separado, solo lectura, usado para la investigación inicial de condiciones).
+
+### `symbol_conditions` (tabla, `src/services/conditionStore.ts`)
+
+Columnas: `symbol` (PK), `condition_id, condition_label, trades, win_rate_pct, total_return_pct, avg_return_pct, max_drawdown_pct, updated_at`. Una fila por símbolo del watchlist con la condición ganadora y las métricas del backtest que la eligió.
+
+- **Cómo se calcula/persiste**: `npm run backtest` (`runBacktestForWatchlist`) corre `runBacktest(symbol, bars, riskProfile, conditionId)` para las 12 condiciones de cada símbolo (con el motor real de orden límite de vibe-bots, no el motor "optimista" - entra al `open` del día siguiente, siempre se llena - de `/root/bots/backtests`), elige la de mayor `totalReturnPct` entre las que tuvieron al menos 1 trade (si ninguna operó, usa `sma_cross_10_30` con `trades: 0`), y hace upsert en `symbol_conditions` (`saveSymbolConditions`). `backtest_runs.params.conditions` registra `{symbol, conditionId}` de cada corrida para trazabilidad. `symbolSummaries`/`trades` de `backtest_runs`/`backtest_trades` (y por lo tanto el bloque "Backtest" del dashboard) corresponden SOLO a la condición ganadora de cada símbolo.
+- **Cómo se lee**: `runTradingCycle()` y `GET /api/trading/status` llaman a `getSymbolConditions(pool)` al inicio de cada ciclo/request (sin caché, igual que `bot_settings`) y resuelven `conditionId = symbolConditions.get(symbol)?.conditionId ?? DEFAULT_CONDITION_ID` (`DEFAULT_CONDITION_ID = 'sma_cross_10_30'`). Antes de la primera corrida de `npm run backtest`, todos los símbolos usan ese fallback (= comportamiento histórico, sin cambios).
+- **Posición abierta + cambio de condición**: si `npm run backtest` cambia la condición ganadora de un símbolo con posición abierta, la salida sigue gobernada por la bracket order TP/SL ya colocada en Alpaca, o por la señal SELL de la NUEVA condición en el próximo ciclo - sin manejo especial (análogo a un cambio de `bot_settings.riskProfile` con posiciones abiertas).
+
+### Modelo de precio de entrada/salida generalizado
+
+`computeEstimatedEntryPrice(ctx, i, conditionId)` (`src/strategy/conditions.ts`), usado por `signals.ts` y `backtest.ts`:
+
+- `sma_cross_10_30` (fastPeriod=10 vs SMA30) y `sma_cross_20_50` (fastPeriod=20 vs SMA50): `estimateEntryPrice(closes, fastPeriod, smaSlow)` - el nivel de cierre que haría que la SMA rápida de la próxima sesión alcance la SMA lenta actual (misma fórmula de fases anteriores, ahora parametrizada por período).
+- Las otras 10 condiciones: `estimatedEntryPrice = price` (cierre actual) - orden límite al último cierre, sin proyección de cruce.
+- En todos los casos, `estimatedExitPrice = estimatedEntryPrice * (1 + riskProfile.takeProfitPct)`. `entryPrice = min(estimatedEntryPrice, price)` sigue igual en `tradingRunner.ts`/`backtest.ts` (para las 10 condiciones nuevas, `entryPrice == price`).
+
+### `BARS_LOOKBACK` (señales/trading, distinto de `BARS_LOOKBACK_DAYS` de ingesta)
+
+`runTradingCycle()`, `GET /api/trading/status` y `getRecentOhlcBars(pool, symbol, limit)` (`src/services/marketStore.ts`) usan `BARS_LOOKBACK = 100` velas OHLC diarias (antes `CLOSES_LOOKBACK = 60`, solo cierres) - suficientes para el warm-up de SMA50/EMA26/MACD/Bollinger/Estocástico/CCI/Donchian, los indicadores de mayor período entre las 12 condiciones. `computeSignal` además exige un mínimo de 51 velas (`MIN_BARS`) para poder detectar cruces en `i` e `i-1` con SMA50; con menos, devuelve HOLD ("Histórico insuficiente para calcular indicadores"). No afecta `BARS_LOOKBACK_DAYS=220` (`src/watchlist.ts`), usado por la ingesta diaria.
+
+### `GET /api/conditions`
+
+Devuelve `{ ok, generatedAt, conditions: [{symbol, conditionId, conditionLabel, trades, winRatePct, totalReturnPct, avgReturnPct, maxDrawdownPct, updatedAt}], catalog: [{id, label}] }` - uno por símbolo del watchlist (desde `symbol_conditions`, con fallback `sma_cross_10_30`/`trades: 0` si aún no corrió `npm run backtest`) más el catálogo completo de las 12 condiciones disponibles. Transparencia de qué condición usa cada símbolo y sus métricas de backtest.
+
+### Fase 6.1: `reason` con valores, overlays de gráfico por condición y tablas de resumen
+
+Ampliación de Fase 6 (mismo día, sin cambios en `condition.evaluate()` ni en el modelo de precios de entrada/salida - puramente texto/visualización):
+
+- **`describe(ctx, i)`** (nuevo método de `Condition`, una implementación por cada una de las 12 condiciones en `conditions.ts`): devuelve un fragmento con los valores de indicador que justifican la señal en `i` (p.ej. `SMA10=123.45 SMA30=120.10 RSI14=58.30 Mom10=2.10%`, `MACD=1.234 Señal=0.987`, `%K=15.2 %D=22.7`). `fmtVal(value, decimals=2)` formatea `null` como `'n/a'`.
+- **`reason` enriquecido** (`signals.ts`): `` `${signal} por "${condition.label}" (${details})` `` (BUY/SELL) o `` `Sin señal (condición activa: "${condition.label}"; ${details})` `` (HOLD), con `details = condition.describe(ctx, i)`. Los dos casos tempranos (sin datos / histórico insuficiente) no cambian, ya que no hay `IndicatorContext` disponible todavía.
+- **`ChartPoint`/`buildChartSeries`** (`chart.ts`, reescrito): ahora expone TODOS los campos de `IndicatorContext` por punto (sma10/20/30/50, ema12/26, rsi14, macd/macdSignal, bbUpper/Middle/Lower, stochK/D, williamsR, cci20, priorHigh20/priorLow10), no solo SMA10/SMA30/RSI. `/api/trading/chart/:symbol` usa `getRecentOhlcBars` (antes `getRecentBars`) y `CHART_LOOKBACK_BARS` subió de 90 a 150 (~100 puntos válidos de SMA50 dentro de la ventana visible).
+- **`CONDITION_CHART_CONFIG`** (`public/app.js`): mapa `conditionId -> { price?: [{key,label,color}], oscillator?: {label, series, min?, max?, levels?} }` que decide qué overlays mostrar en `renderSymbolCharts` según la condición activa de cada símbolo - ver "Gráfico" en "Sección 'Resumen por símbolo' del frontend" más abajo.
+- **Dos tablas nuevas** en "Resumen por símbolo": "Resumen de señales" (`#signals-summary-table`, los 20 símbolos con condición activa y motivo) y "Condiciones por símbolo (backtest)" (`#conditions-table`, condición ganadora + métricas de `/api/conditions` por símbolo) - ver detalle más abajo.
 
 ## Dashboard web (`npm run web`)
 
@@ -336,10 +395,11 @@ La subida a MinIO es **best-effort**: si falla (p.ej. MinIO caído), se loguea e
 - `GET /api/config` - expone configuración pública para el frontend (por ahora, `grafanaPublicUrl`).
 - `POST /api/ingest` - ejecuta `src/ingestRunner.ts` (misma lógica que `npm run ingest`) y devuelve un resumen JSON.
 - `GET /api/trading/status` - cuenta, posiciones, señales (frescas, ETF + Acciones) y órdenes recientes (ver más arriba).
-- `GET /api/trading/chart/:symbol` - serie de los últimos `CHART_LOOKBACK_BARS` (90) cierres + SMA10/SMA30/RSI para un símbolo (`buildChartSeries` en `src/strategy/chart.ts`, datos de `getRecentBars`).
+- `GET /api/trading/chart/:symbol` - serie de las últimas `CHART_LOOKBACK_BARS` (150, Fase 6.1) velas OHLC de un símbolo, con el precio de cierre + TODOS los campos de `IndicatorContext` (`ChartPoint`: sma10/20/30/50, ema12/26, rsi14, macd/macdSignal, bandas de Bollinger, estocástico %K/%D, Williams %R, CCI20, canal de Donchian) vía `buildChartSeries` (`src/strategy/chart.ts`, datos de `getRecentOhlcBars`). El frontend elige qué campos mostrar como overlay según la condición activa del símbolo (`CONDITION_CHART_CONFIG`, ver "Resumen por símbolo" más abajo).
 - `POST /api/trading/run` - ejecuta `src/tradingRunner.ts` (misma lógica que `npm run trade`); **coloca/cierra órdenes reales en la cuenta paper de Alpaca**.
 - `POST /api/backtesting/run` - corre el backtest del watchlist completo y lo persiste (ver más arriba).
 - `GET /api/backtesting/results` - última corrida de backtest persistida, con sus trades.
+- `GET /api/conditions` - condición técnica activa de cada símbolo (`symbol_conditions`) + catálogo completo de las 12 condiciones disponibles (ver "Fase 6: estrategia multi-condicional por símbolo" más arriba).
 - `GET /api/assessments` - última evaluación de IA (Claude) por símbolo (ver más arriba). Devuelve `[]` mientras la fase de IA no haya corrido (p.ej. si falló la última llamada a Claude).
 - `GET /api/settings` / `POST /api/settings` - leer/guardar el perfil de riesgo, preset y modelo de Claude activos (`bot_settings`, ver más arriba).
 - `POST /api/settings/trading-enabled` - activar/desactivar el interruptor de órdenes a Alpaca (`bot_settings.trading_enabled`, ver "Interruptor ON/OFF de órdenes a Alpaca" más arriba).
@@ -348,12 +408,19 @@ La subida a MinIO es **best-effort**: si falla (p.ej. MinIO caído), se loguea e
 
 ### Sección "Resumen por símbolo" del frontend
 
-Sección única que fusiona trading, evaluaciones de IA y backtesting - reemplaza las antiguas secciones separadas "Trading (paper)", "Evaluaciones de IA (Claude)" y "Backtesting". Muestra primero los datos de cuenta (`GET /api/trading/status`) y el resumen de la última corrida de backtest (período cubierto + resumen de portafolio, `GET /api/backtesting/results`), y luego dos sub-secciones, **ETFs** y **Acciones**, con una **tarjeta por símbolo** (`renderSymbolCard`) que funciona como mini-informe:
+Sección única que fusiona trading, evaluaciones de IA y backtesting - reemplaza las antiguas secciones separadas "Trading (paper)", "Evaluaciones de IA (Claude)" y "Backtesting". Muestra primero los datos de cuenta (`GET /api/trading/status`) y el resumen de la última corrida de backtest (período cubierto + resumen de portafolio, `GET /api/backtesting/results`).
+
+A continuación, dos tablas de resumen (Fase 6.1):
+
+- **Resumen de señales** (`#signals-summary-table`, `renderSignalsSummaryTable`): una fila por símbolo (los 20, en el orden devuelto por `GET /api/trading/status`) con columnas Símbolo, Tipo (ETF/Stock), Señal (badge BUY/SELL/HOLD), Condición activa y Motivo (`reason`, con los valores de indicador de `condition.describe()`).
+- **Condiciones por símbolo (backtest)** (`#conditions-table`, `renderConditionsTable`): una fila por símbolo con la condición ganadora y las métricas de `GET /api/conditions` (Trades, Win rate, Retorno total, Retorno prom., Max drawdown, Actualizado) - justifica por qué `npm run backtest` eligió esa condición para ese símbolo.
+
+Luego, dos sub-secciones, **ETFs** y **Acciones**, con una **tarjeta por símbolo** (`renderSymbolCard`) que funciona como mini-informe:
 
 - **Encabezado**: símbolo + badge de señal (`BUY`/`SELL`/`HOLD`).
-- **Datos**: Precio, SMA10, SMA30, RSI, Momentum, **Precio est. entrada**, **Precio est. salida** y el motivo de la señal.
+- **Datos**: Precio, **Condición activa** (Fase 6), SMA10, SMA30, RSI, Momentum, **Precio est. entrada**, **Precio est. salida** y el motivo de la señal.
 - **Posición abierta** (si existe): cantidad, precio de entrada, precio actual, valor y P/L no realizado (desde `positions` de `/api/trading/status`).
-- **Gráfico** (`/api/trading/chart/:symbol`): Precio (azul), SMA10 (verde), SMA30 (naranja), y franjas horizontales punteadas de Precio est. entrada (amarillo) y Precio est. salida (violeta). Si no hay datos históricos todavía, muestra un mensaje en vez del gráfico.
+- **Gráfico** (`/api/trading/chart/:symbol`): Precio (azul) + overlays específicos de la **condición activa** del símbolo (Fase 6.1, `CONDITION_CHART_CONFIG` en `public/app.js`) - p.ej. SMA10/SMA30 para `sma_cross_10_30`, SMA20/SMA50 para `sma_cross_20_50`, EMA12/EMA26 para `ema_cross_12_26`, bandas de Bollinger para `bollinger_reversion`/`bollinger_breakout`, o el canal de Donchian para `donchian_breakout_20`, todos en el eje de precio (`y`). Las condiciones basadas en osciladores (`macd_cross`, `rsi_reversal_30_70`, `stochastic_cross`, `williams_r_reversal`, `cci_reversal`, y el RSI de `trend_pullback_sma50`) agregan un panel secundario (eje `y1`, a la derecha) con sus series y líneas punteadas grises en los umbrales de la condición (p.ej. 30/70 para RSI, 20/80 para el Estocástico, -80/-20 para Williams %R). Siempre incluye franjas horizontales punteadas de Precio est. entrada (amarillo) y Precio est. salida (violeta) en el eje de precio. Si no hay datos históricos todavía, muestra un mensaje en vez del gráfico.
 - **Evaluación de IA**: recomendación, score, confianza, fecha, ajuste entrada/salida (`—` si Claude no propuso nada) y justificación (desde `GET /api/assessments`), o "Sin evaluación todavía" si la fase de IA no corrió para ese símbolo.
 - **Backtest**: trades, win rate, retorno total, retorno promedio y max drawdown (desde `summary.symbols` de `GET /api/backtesting/results`), o "Sin backtest todavía" si el símbolo no está en la última corrida.
 
@@ -404,12 +471,13 @@ Grafana corre como servicio nativo (`systemctl status grafana-server`) en `http:
 ## Base de datos - tablas clave
 
 - `market_bars`, `news_items`, `fundamentals_snapshots`, `macro_series` - ver "Ingesta de datos" más arriba.
-- `trading_signals` - una fila por señal calculada en cada `runTradingCycle()`: `symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason`.
+- `trading_signals` - una fila por señal calculada en cada `runTradingCycle()`: `symbol, ts, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, condition_id, condition_label`.
 - `trading_orders` - una fila por orden ejecutada (o error): `signal_id` (FK a `trading_signals`), `symbol, ts, side, qty, order_type, alpaca_order_id, take_profit_price, stop_loss_price, status, raw` (JSONB con la respuesta completa de Alpaca).
 - `ai_assessments` (independiente, sin FK): `symbol, ts, score, recommendation, confidence, rationale, model, adjusted_entry_price, adjusted_exit_price` - una fila por símbolo en cada ciclo donde corrió la fase de IA (ver "Capa de IA (Claude)" más arriba). Las dos últimas columnas son las propuestas crudas de Claude antes del recorte ±10%.
 - `backtest_runs`: `id, run_at, symbols, start_date, end_date, params JSONB, summary JSONB`.
 - `backtest_trades`: `id, run_id` (FK a `backtest_runs`), `symbol, entry_date, entry_price, exit_date, exit_price, exit_reason, pnl_pct` (ver "Backtesting" más arriba).
 - `bot_settings` (singleton `id=1`): `risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, updated_at` - perfil de riesgo, modelo de Claude e interruptor ON/OFF de órdenes activos (ver "Configuración dinámica (`bot_settings`)" más arriba).
+- `symbol_conditions` (PK `symbol`): `condition_id, condition_label, trades, win_rate_pct, total_return_pct, avg_return_pct, max_drawdown_pct, updated_at` - condición técnica ganadora por símbolo, calculada por `npm run backtest` y leída por `runTradingCycle()`/`GET /api/trading/status` (ver "Fase 6: estrategia multi-condicional por símbolo" más arriba).
 
 `setupTradingSchema` (`src/services/tradingStore.ts`) crea las tablas si no existen y agrega columnas nuevas vía `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (no hay framework de migraciones). Se ejecuta al inicio de `runTradingCycle()`; `GET /api/trading/status` no la ejecuta, así que columnas nuevas deben existir ya en la base (aplicadas manualmente o mediante un `npm run trade` previo) para que ese endpoint no falle. `setupBacktestSchema` (`src/services/backtestStore.ts`) crea `backtest_runs`/`backtest_trades` y se ejecuta al inicio de `runBacktestForWatchlist()` y de `GET /api/backtesting/results`.
 
@@ -422,9 +490,9 @@ Mapa rápido de módulos (todos operativos):
 1. **Ingesta de datos en PostgreSQL** (`src/ingest.ts`, `src/ingestRunner.ts`): bars, noticias, fundamentales y series macro para 20 símbolos (11 ETFs + 9 acciones).
 2. **Redis** (`src/services/cache.ts`, ver sección "Caché en Redis"): quotes de Finnhub, resultados de `/api/health` por API externa (TTLs según cuota, p.ej. 2h para Alpha Vantage) y estado de Alpaca (cuenta/posiciones/órdenes abiertas) compartido entre `runTradingCycle()` y `GET /api/trading/status` para reducir llamadas a Alpaca desde el polling del dashboard.
 3. **Dashboard web** (`src/server.ts` + `public/`): health checks, ingesta manual, interruptor ON/OFF de órdenes a Alpaca (header), sección "Configuración" y sección "Resumen por símbolo" (un mini-informe por símbolo - señal/gráfico, evaluación de IA y backtest -, ETF/Acciones, ranking por atractivo, terminando con posiciones abiertas y órdenes ejecutadas).
-4. **Estrategia + ejecución automática de órdenes vía Alpaca** (`src/strategy/`, `src/tradingRunner.ts`, `npm run trade`): señales SMA10/SMA30 + RSI + momentum, precio estimado de entrada/salida, perfil de riesgo dinámico (`bot_settings`) y bracket orders **límite** en paper - salvo que el interruptor ON/OFF del dashboard esté en OFF (`TRADING_DISABLED`). Persistencia en `trading_signals`/`trading_orders`, expuesto en `/api/trading/*`, dashboard web y Grafana.
+4. **Estrategia + ejecución automática de órdenes vía Alpaca** (`src/strategy/`, `src/tradingRunner.ts`, `npm run trade`): cada símbolo opera con su propia **condición técnica activa** (1 de 12, Fase 6, `symbol_conditions`, fallback `sma_cross_10_30`), con SMA10/SMA30/RSI/momentum siempre calculados como contexto general, precio estimado de entrada/salida generalizado por condición, perfil de riesgo dinámico (`bot_settings`) y bracket orders **límite** en paper - salvo que el interruptor ON/OFF del dashboard esté en OFF (`TRADING_DISABLED`). Persistencia en `trading_signals`/`trading_orders`, expuesto en `/api/trading/*`, dashboard web y Grafana.
 5. **Snapshots de ingesta/trading en MinIO** (`src/services/storage.ts`): cada `npm run ingest`/`npm run trade` sube un snapshot JSON crudo (`ingest/<ts>.json` / `trading/<ts>.json`), listado y descargable desde el dashboard (`GET /api/snapshots`, `GET /api/snapshots/download`). Subida best-effort (no rompe la corrida si MinIO falla). Backup periódico de PostgreSQL a MinIO queda diferido (ver roadmap).
-6. **Backtesting** (`src/strategy/backtest.ts`, `src/backtestRunner.ts`, `npm run backtest`): simula la estrategia real sobre el histórico de `market_bars` por símbolo usando el perfil de riesgo activo de `bot_settings`, persiste en `backtest_runs`/`backtest_trades`, expuesto en `/api/backtesting/*` y, por símbolo, en la sección "Resumen por símbolo" del dashboard. `npm run backfill-history` (opcional, no corrido aún) permite ampliar el histórico para backtests más largos.
+6. **Backtesting** (`src/strategy/backtest.ts`, `src/backtestRunner.ts`, `npm run backtest`): para cada símbolo, corre las 12 condiciones de TA (Fase 6) con el motor real de orden límite sobre el histórico de `market_bars`, usando el perfil de riesgo activo de `bot_settings`; persiste la condición ganadora en `symbol_conditions` y los trades/resumen de esa condición en `backtest_runs`/`backtest_trades`, expuesto en `/api/backtesting/*`, `/api/conditions` y, por símbolo, en la sección "Resumen por símbolo" del dashboard. `npm run backfill-history` (opcional, no corrido aún) permite ampliar el histórico para backtests más largos.
 7. **Capa de IA (Claude)** (`src/services/claude.ts`, `src/tradingRunner.ts`): **activa desde 2026-06-14** (`ANTHROPIC_API_KEY` configurada) - evaluación batched (técnico + precios estimados + fundamentales FMP + noticias + macro FRED) que puede vetar señales BUY (`AI_BLOCKED`) y proponer ajustes acotados a `estimatedEntryPrice`/`estimatedExitPrice`; persistida en `ai_assessments` y expuesta en `GET /api/assessments` + sección "Resumen por símbolo" del dashboard. Fail-open si la llamada a Claude falla.
 8. **Configuración dinámica** (`bot_settings`, `src/services/settingsStore.ts`): perfil de riesgo (con presets Conservador/Moderado/Agresivo/Personalizado), modelo de Claude (lista curada de 3), límite de ajuste de precios de IA (±10%) e interruptor ON/OFF de órdenes a Alpaca (`trading_enabled`), editables desde el dashboard (`GET`/`POST /api/settings`, `POST /api/settings/trading-enabled`) y leídos en caliente por `runTradingCycle()`/`runBacktestForWatchlist()`/`GET /api/trading/status`. `RISK_PROFILE`/`RISK_PROFILE_PRESETS` (`strategy/config.ts`) quedan como defaults/semillas.
 

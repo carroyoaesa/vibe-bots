@@ -125,6 +125,36 @@
       <div id="backtesting-period" class="muted"></div>
       <div id="backtesting-portfolio" class="muted"></div>
 
+      <h3>Resumen de señales</h3>
+      <div class="table-wrap">
+        <table id="signals-summary-table">
+          <thead>
+            <tr><th>Símbolo</th><th>Tipo</th><th>Señal</th><th>Condición activa</th><th>Motivo</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>Condiciones por símbolo (backtest)</h3>
+      <p id="conditions-table-note" class="muted"></p>
+      <div class="table-wrap">
+        <table id="conditions-table">
+          <thead>
+            <tr>
+              <th>Símbolo</th>
+              <th>Condición</th>
+              <th>Trades</th>
+              <th>Win rate</th>
+              <th title="Retorno acumulado (compuesto) de todas las operaciones de esa condición durante el período del backtest, no es por operación">Retorno total</th>
+              <th title="Retorno promedio de cada operación individual">Retorno prom.</th>
+              <th>Max DD</th>
+              <th>Actualizado</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
       <h3>ETFs</h3>
       <div id="symbol-reports-etf" class="symbol-report-grid"></div>
 

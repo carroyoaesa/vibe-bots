@@ -220,3 +220,24 @@ export async function getAllBars(pool: Pool, symbol: string): Promise<OhlcBar[]>
     close: Number(row.close),
   }));
 }
+
+/** Últimas `limit` velas diarias (OHLC) de un símbolo, en orden ascendente por fecha (Fase 6, multi-condicional). */
+export async function getRecentOhlcBars(pool: Pool, symbol: string, limit: number): Promise<OhlcBar[]> {
+  const result = await pool.query(
+    `SELECT ts, open, high, low, close FROM market_bars
+     WHERE symbol = $1 AND timeframe = '1Day'
+     ORDER BY ts DESC
+     LIMIT $2`,
+    [symbol, limit]
+  );
+
+  return result.rows
+    .map((row) => ({
+      ts: new Date(row.ts).toISOString(),
+      open: Number(row.open),
+      high: Number(row.high),
+      low: Number(row.low),
+      close: Number(row.close),
+    }))
+    .reverse();
+}

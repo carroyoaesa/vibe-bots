@@ -241,6 +241,15 @@ td.muted {
   color: #9aa0a6;
 }
 
+.condition-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
 .pl-positive {
   color: #2ecc71;
 }

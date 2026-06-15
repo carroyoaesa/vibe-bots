@@ -1,13 +1,5 @@
-import { computeSignal } from './signals';
-import { RISK_PROFILE, RiskProfile, STRATEGY_PARAMS } from './config';
-
-export interface BacktestBar {
-  ts: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-}
+import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, OhlcBar } from './conditions';
+import { RISK_PROFILE, RiskProfile } from './config';
 
 export type BacktestExitReason = 'TP' | 'SL' | 'SELL_SIGNAL' | 'END_OF_DATA';
 
@@ -38,30 +30,36 @@ export interface BacktestResult {
 }
 
 /**
- * Simulación por símbolo de la estrategia Fase 2 sobre velas diarias (OHLC), en % de
- * retorno por operación. Reutiliza las reglas de la bracket order real:
+ * Simulación por símbolo de la condición de estado activa (Fase 6, `strategy/conditions.ts`)
+ * sobre velas diarias (OHLC), en % de retorno por operación. Reutiliza las reglas de la
+ * bracket order real:
  * - Entrada límite = min(estimatedEntryPrice, price), fill al día siguiente si
  *   el low de esa sesión toca el precio límite (si no, la orden no se llena).
  * - Salida por TP (+6%) o SL (-3%) según high/low diario (SL gana si ambos se
- *   tocan el mismo día), o por señal SELL al cierre de esa sesión.
+ *   tocan el mismo día), o por señal SELL de la misma condición al cierre de esa sesión.
  * - Si no hay salida antes de fin de datos, se marca a mercado (END_OF_DATA).
  */
-export function runBacktest(symbol: string, bars: BacktestBar[], riskProfile: RiskProfile = RISK_PROFILE): BacktestResult {
-  const { smaSlowPeriod } = STRATEGY_PARAMS;
-  const closes = bars.map((bar) => bar.close);
+export function runBacktest(
+  symbol: string,
+  bars: OhlcBar[],
+  riskProfile: RiskProfile = RISK_PROFILE,
+  conditionId: string = DEFAULT_CONDITION_ID
+): BacktestResult {
+  const condition = CONDITIONS.find((c) => c.id === conditionId) ?? CONDITIONS[0];
+  const ctx = buildIndicatorContext(bars);
   const trades: BacktestTrade[] = [];
 
-  // computeSignal solo deja de devolver HOLD por "histórico insuficiente" a partir
-  // de smaSlowPeriod + 1 cierres (índice smaSlowPeriod, base 0).
-  let i = smaSlowPeriod;
+  // i=1 (no i=0) para que ctx[i-1] sea siempre un índice válido del array;
+  // las condiciones devuelven HOLD por sí solas mientras los indicadores sean null.
+  let i = 1;
 
   while (i < bars.length) {
-    const signal = computeSignal(symbol, closes.slice(0, i + 1), riskProfile);
+    const action = condition.evaluate(ctx, i);
 
-    if (signal.signal === 'BUY' && i + 1 < bars.length) {
-      const entryPrice = signal.estimatedEntryPrice !== null
-        ? Math.min(signal.estimatedEntryPrice, signal.price)
-        : signal.price;
+    if (action === 'BUY' && i + 1 < bars.length) {
+      const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, condition.id);
+      const price = ctx.closes[i];
+      const entryPrice = estimatedEntryPrice !== null ? Math.min(estimatedEntryPrice, price) : price;
 
       const fillDay = bars[i + 1];
 
@@ -93,8 +91,7 @@ export function runBacktest(symbol: string, bars: BacktestBar[], riskProfile: Ri
             break;
           }
 
-          const exitSignal = computeSignal(symbol, closes.slice(0, j + 1), riskProfile);
-          if (exitSignal.signal === 'SELL') {
+          if (condition.evaluate(ctx, j) === 'SELL') {
             exitDate = day.ts;
             exitPrice = day.close;
             exitReason = 'SELL_SIGNAL';

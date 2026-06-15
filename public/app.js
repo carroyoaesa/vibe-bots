@@ -22,6 +22,9 @@ const backtestingPeriod = document.getElementById('backtesting-period');
 const backtestingPortfolio = document.getElementById('backtesting-portfolio');
 const symbolReportsEtf = document.getElementById('symbol-reports-etf');
 const symbolReportsStock = document.getElementById('symbol-reports-stock');
+const signalsSummaryTableBody = document.querySelector('#signals-summary-table tbody');
+const conditionsTableBody = document.querySelector('#conditions-table tbody');
+const conditionsTableNote = document.getElementById('conditions-table-note');
 const positionsTableBody = document.querySelector('#positions-table tbody');
 const ordersTableBody = document.querySelector('#orders-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
@@ -254,6 +257,7 @@ function renderSymbolStats(signal) {
 
   return [
     stat('Precio', fmtMoney(signal.price)),
+    stat('Condición activa', signal.conditionLabel ?? '—'),
     stat('SMA10', fmtNum(signal.smaFast)),
     stat('SMA30', fmtNum(signal.smaSlow)),
     stat('RSI', fmtNum(signal.rsi)),
@@ -389,6 +393,138 @@ function renderSymbolReportsGroup(container, signals, assessmentsBySymbol, backt
   ));
 }
 
+/**
+ * Color representativo por condición, usado como badge en "Condición
+ * activa"/"Condición" (tablas de resumen y de backtest) para identificar
+ * de un vistazo qué símbolos comparten la misma condición.
+ */
+const CONDITION_COLORS = {
+  sma_cross_10_30: '#2ecc71',
+  sma_cross_20_50: '#16a085',
+  ema_cross_12_26: '#1abc9c',
+  macd_cross: '#4a82f0',
+  rsi_reversal_30_70: '#9b59b6',
+  bollinger_reversion: '#e67e22',
+  bollinger_breakout: '#d35400',
+  stochastic_cross: '#e74c3c',
+  williams_r_reversal: '#c0392b',
+  cci_reversal: '#e84393',
+  donchian_breakout_20: '#f1c40f',
+  trend_pullback_sma50: '#3498db',
+};
+
+function conditionBadge(conditionId, label) {
+  const text = label ?? '—';
+  if (!conditionId) return text;
+  const color = CONDITION_COLORS[conditionId] ?? '#9aa0a6';
+  return `<span class="condition-dot" style="background-color: ${color}"></span>${text}`;
+}
+
+/**
+ * Overlays de gráfico por condición activa (Fase 6.1), usando los campos de
+ * `ChartPoint` (`strategy/chart.ts`). `price`: líneas en el eje de precio (`y`),
+ * mismas unidades que "Precio". `oscillator`: panel secundario (`y1`), con
+ * `levels` (umbrales de la condición) dibujados como líneas punteadas grises.
+ */
+const CONDITION_CHART_CONFIG = {
+  sma_cross_10_30: {
+    price: [
+      { key: 'sma10', label: 'SMA10', color: '#2ecc71' },
+      { key: 'sma30', label: 'SMA30', color: '#e67e22' },
+    ],
+  },
+  sma_cross_20_50: {
+    price: [
+      { key: 'sma20', label: 'SMA20', color: '#2ecc71' },
+      { key: 'sma50', label: 'SMA50', color: '#e67e22' },
+    ],
+  },
+  ema_cross_12_26: {
+    price: [
+      { key: 'ema12', label: 'EMA12', color: '#2ecc71' },
+      { key: 'ema26', label: 'EMA26', color: '#e67e22' },
+    ],
+  },
+  macd_cross: {
+    oscillator: {
+      label: 'MACD(12,26,9)',
+      series: [
+        { key: 'macd', label: 'MACD', color: '#2ecc71' },
+        { key: 'macdSignal', label: 'Señal', color: '#e67e22' },
+      ],
+    },
+  },
+  rsi_reversal_30_70: {
+    oscillator: {
+      label: 'RSI(14)',
+      series: [{ key: 'rsi14', label: 'RSI14', color: '#2ecc71' }],
+      min: 0,
+      max: 100,
+      levels: [30, 70],
+    },
+  },
+  bollinger_reversion: {
+    price: [
+      { key: 'bbUpper', label: 'BB sup', color: '#e67e22' },
+      { key: 'bbMiddle', label: 'BB media', color: '#9aa0a6' },
+      { key: 'bbLower', label: 'BB inf', color: '#2ecc71' },
+    ],
+  },
+  bollinger_breakout: {
+    price: [
+      { key: 'bbUpper', label: 'BB sup', color: '#e67e22' },
+      { key: 'bbMiddle', label: 'BB media', color: '#9aa0a6' },
+      { key: 'bbLower', label: 'BB inf', color: '#2ecc71' },
+    ],
+  },
+  stochastic_cross: {
+    oscillator: {
+      label: 'Estocástico(14,3)',
+      series: [
+        { key: 'stochK', label: '%K', color: '#2ecc71' },
+        { key: 'stochD', label: '%D', color: '#e67e22' },
+      ],
+      min: 0,
+      max: 100,
+      levels: [20, 80],
+    },
+  },
+  williams_r_reversal: {
+    oscillator: {
+      label: 'Williams %R(14)',
+      series: [{ key: 'williamsR', label: '%R', color: '#2ecc71' }],
+      min: -100,
+      max: 0,
+      levels: [-80, -20],
+    },
+  },
+  cci_reversal: {
+    oscillator: {
+      label: 'CCI(20)',
+      series: [{ key: 'cci20', label: 'CCI20', color: '#2ecc71' }],
+      levels: [-100, 100],
+    },
+  },
+  donchian_breakout_20: {
+    price: [
+      { key: 'priorHigh20', label: 'Canal sup (20)', color: '#e67e22' },
+      { key: 'priorLow10', label: 'Canal inf (10)', color: '#2ecc71' },
+    ],
+  },
+  trend_pullback_sma50: {
+    price: [
+      { key: 'sma50', label: 'SMA50', color: '#e67e22' },
+    ],
+    oscillator: {
+      label: 'RSI(14)',
+      series: [{ key: 'rsi14', label: 'RSI14', color: '#2ecc71' }],
+      min: 0,
+      max: 100,
+      levels: [40],
+    },
+  },
+};
+
 async function renderSymbolCharts(entries) {
   if (entries.length === 0) return;
 
@@ -423,8 +559,7 @@ async function renderSymbolCharts(entries) {
 
     const labels = result.points.map((point) => new Date(point.ts).toLocaleDateString());
     const closes = result.points.map((point) => point.close);
-    const smaFast = result.points.map((point) => point.smaFast);
-    const smaSlow = result.points.map((point) => point.smaSlow);
+    const chartConfig = CONDITION_CHART_CONFIG[signal.conditionId] ?? {};
 
     const datasets = [
       {
@@ -435,26 +570,22 @@ async function renderSymbolCharts(entries) {
         borderWidth: 2,
         pointRadius: 0,
         tension: 0.1,
-      },
-      {
-        label: 'SMA10',
-        data: smaFast,
-        borderColor: '#2ecc71',
-        backgroundColor: 'transparent',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.1,
-      },
-      {
-        label: 'SMA30',
-        data: smaSlow,
-        borderColor: '#e67e22',
-        backgroundColor: 'transparent',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.1,
+        yAxisID: 'y',
       },
     ];
+
+    (chartConfig.price ?? []).forEach((overlay) => {
+      datasets.push({
+        label: overlay.label,
+        data: result.points.map((point) => point[overlay.key]),
+        borderColor: overlay.color,
+        backgroundColor: 'transparent',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+        yAxisID: 'y',
+      });
+    });
 
     if (signal.estimatedEntryPrice !== null) {
       datasets.push({
@@ -466,6 +597,7 @@ async function renderSymbolCharts(entries) {
         borderDash: [6, 4],
         pointRadius: 0,
         tension: 0,
+        yAxisID: 'y',
       });
     }
     if (signal.estimatedExitPrice !== null) {
@@ -478,7 +610,54 @@ async function renderSymbolCharts(entries) {
         borderDash: [6, 4],
         pointRadius: 0,
         tension: 0,
+        yAxisID: 'y',
       });
+    }
+
+    const oscillator = chartConfig.oscillator;
+    if (oscillator) {
+      oscillator.series.forEach((s) => {
+        datasets.push({
+          label: s.label,
+          data: result.points.map((point) => point[s.key]),
+          borderColor: s.color,
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.1,
+          yAxisID: 'y1',
+        });
+      });
+
+      (oscillator.levels ?? []).forEach((level) => {
+        datasets.push({
+          label: `Nivel ${level}`,
+          data: labels.map(() => level),
+          borderColor: '#7f8c8d',
+          backgroundColor: 'transparent',
+          borderWidth: 1,
+          borderDash: [4, 4],
+          pointRadius: 0,
+          tension: 0,
+          yAxisID: 'y1',
+        });
+      });
+    }
+
+    const scales = {
+      x: { ticks: { color: '#9aa0a6', maxTicksLimit: 8 }, grid: { color: '#2a2e35' } },
+      y: { ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e35' } },
+    };
+
+    if (oscillator) {
+      scales.y1 = {
+        position: 'right',
+        ticks: { color: '#9aa0a6' },
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: oscillator.label, color: '#9aa0a6' },
+      };
+      if (oscillator.min !== undefined) scales.y1.min = oscillator.min;
+      if (oscillator.max !== undefined) scales.y1.max = oscillator.max;
     }
 
     chartInstances[signal.symbol] = new Chart(canvas, {
@@ -491,10 +670,7 @@ async function renderSymbolCharts(entries) {
         responsive: true,
         maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
-        scales: {
-          x: { ticks: { color: '#9aa0a6', maxTicksLimit: 8 }, grid: { color: '#2a2e35' } },
-          y: { ticks: { color: '#9aa0a6' }, grid: { color: '#2a2e35' } },
-        },
+        scales,
         plugins: {
           legend: { labels: { color: '#c7c9cc' } },
         },
@@ -551,6 +727,7 @@ function renderBacktestingSummary(run) {
   if (!run) {
     backtestingPeriod.textContent = '';
     backtestingPortfolio.textContent = '';
+    conditionsTableNote.textContent = '';
     return;
   }
 
@@ -570,14 +747,74 @@ function renderBacktestingSummary(run) {
     `retorno prom. ${portfolio.avgReturnPct !== null && portfolio.avgReturnPct !== undefined ? `${fmtNum(portfolio.avgReturnPct)}%` : '—'} · ` +
     `win rate prom. ${portfolio.avgWinRatePct !== null && portfolio.avgWinRatePct !== undefined ? `${fmtNum(portfolio.avgWinRatePct, 1)}%` : '—'} · ` +
     `mejor: ${portfolio.bestSymbol ?? '—'} · peor: ${portfolio.worstSymbol ?? '—'}`;
+
+  conditionsTableNote.textContent =
+    `Período del backtest: ${startDate} → ${endDate} (${trades.length} trades guardados en total). ` +
+    `"Retorno total" es el retorno acumulado (compuesto) de todas las operaciones de esa condición durante ese período, ` +
+    `no el resultado de una sola operación. "Retorno prom." es el promedio por operación individual (columna "Trades").`;
+}
+
+function renderSignalsSummaryTable(signals, conditionsBySymbol) {
+  signalsSummaryTableBody.innerHTML = '';
+  if (signals.length === 0) {
+    signalsSummaryTableBody.innerHTML = '<tr><td colspan="5" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+    return;
+  }
+
+  // Orden: agrupados por "Condición activa" (alfabético) y, dentro de cada
+  // grupo, por "Retorno total" del backtest (de mayor a menor).
+  const sorted = [...signals].sort((a, b) => {
+    const labelA = a.conditionLabel ?? '';
+    const labelB = b.conditionLabel ?? '';
+    if (labelA !== labelB) return labelA.localeCompare(labelB);
+    const retA = conditionsBySymbol.get(a.symbol)?.totalReturnPct ?? -Infinity;
+    const retB = conditionsBySymbol.get(b.symbol)?.totalReturnPct ?? -Infinity;
+    return retB - retA;
+  });
+
+  sorted.forEach((signal) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${signal.symbol}</td>
+      <td>${signal.type}</td>
+      <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
+      <td>${conditionBadge(signal.conditionId, signal.conditionLabel)}</td>
+      <td class="muted">${signal.reason}</td>
+    `;
+    signalsSummaryTableBody.appendChild(tr);
+  });
+}
+
+function renderConditionsTable(conditions) {
+  conditionsTableBody.innerHTML = '';
+  if (!conditions || conditions.length === 0) {
+    conditionsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
+    return;
+  }
+
+  conditions.forEach((c) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${c.symbol}</td>
+      <td>${conditionBadge(c.conditionId, c.conditionLabel)}</td>
+      <td>${c.trades}</td>
+      <td>${c.winRatePct !== null ? `${fmtNum(c.winRatePct, 1)}%` : '—'}</td>
+      <td class="${c.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(c.totalReturnPct)}%</td>
+      <td>${c.avgReturnPct !== null ? `${fmtNum(c.avgReturnPct)}%` : '—'}</td>
+      <td>${fmtNum(c.maxDrawdownPct)}%</td>
+      <td>${c.updatedAt ? new Date(c.updatedAt).toLocaleString() : '—'}</td>
+    `;
+    conditionsTableBody.appendChild(tr);
+  });
 }
 
 async function loadSymbolReports() {
   try {
-    const [statusRes, assessmentsRes, backtestingRes] = await Promise.all([
+    const [statusRes, assessmentsRes, backtestingRes, conditionsRes] = await Promise.all([
       fetch('/api/trading/status'),
       fetch('/api/assessments'),
       fetch('/api/backtesting/results'),
+      fetch('/api/conditions'),
     ]);
 
     const statusData = await statusRes.json();
@@ -588,6 +825,7 @@ async function loadSymbolReports() {
 
     const assessmentsData = await assessmentsRes.json();
     const backtestingData = await backtestingRes.json();
+    const conditionsData = await conditionsRes.json();
 
     const { account, positions, signals, orders, openOrdersCount } = statusData;
 
@@ -609,6 +847,11 @@ async function loadSymbolReports() {
     const backtestSummaryBySymbol = new Map(
       (run?.run?.summary?.symbols ?? []).map((s) => [s.symbol, s])
     );
+
+    const conditionsList = conditionsData.ok ? conditionsData.conditions : [];
+    const conditionsBySymbol = new Map(conditionsList.map((c) => [c.symbol, c]));
+    renderSignalsSummaryTable(signals, conditionsBySymbol);
+    renderConditionsTable(conditionsList);
 
     const etfSignals = signals.filter((signal) => signal.type === 'ETF').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
     const stockSignals = signals.filter((signal) => signal.type === 'STOCK').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));

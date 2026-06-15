@@ -18,18 +18,24 @@ import {
   ALPACA_OPEN_ORDERS_CACHE_KEY,
 } from './services/cache';
 import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals } from './services/tradingStore';
-import { getRecentBars, getCloses } from './services/marketStore';
+import { getRecentOhlcBars } from './services/marketStore';
 import { buildChartSeries } from './strategy/chart';
 import { computeSignal } from './strategy/signals';
+import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
 import { runBacktestForWatchlist } from './backtestRunner';
 import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
+import { setupConditionSchema, getSymbolConditions } from './services/conditionStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
 
-const CHART_LOOKBACK_BARS = 90;
-const SIGNAL_CLOSES_LOOKBACK = 60;
+// Velas para el gráfico por símbolo: suficientes para que SMA50/EMA26/Donchian etc.
+// (los indicadores de mayor período entre las 12 condiciones) tengan ~100 puntos
+// válidos dentro de la ventana visible (Fase 6.1).
+const CHART_LOOKBACK_BARS = 150;
+// Velas (OHLC diarias) pedidas por símbolo para recalcular la señal de cada condición activa (Fase 6).
+const BARS_LOOKBACK = 100;
 const SNAPSHOT_KEY_PATTERN = /^(ingest|trading)\/[A-Za-z0-9_\-:.]+\.json$/;
 const SNAPSHOTS_LIMIT = 30;
 
@@ -63,7 +69,9 @@ app.get('/api/trading/status', async (_req, res) => {
 
   try {
     await setupSettingsSchema(pool);
+    await setupConditionSchema(pool);
     const settings = await getSettings(pool);
+    const symbolConditions = await getSymbolConditions(pool);
 
     const [account, positions, orders, latestSignals, openOrdersCache] = await Promise.all([
       // Cuenta y posiciones se cachean en Redis (TTLs cortos) y se comparten con el check
@@ -82,8 +90,9 @@ app.get('/api/trading/status', async (_req, res) => {
 
     const signals = await Promise.all(
       WATCHLIST.map(async (symbol) => {
-        const closes = await getCloses(pool, symbol, SIGNAL_CLOSES_LOOKBACK);
-        const signal = computeSignal(symbol, closes, settings.riskProfile);
+        const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
+        const conditionId = symbolConditions.get(symbol)?.conditionId ?? DEFAULT_CONDITION_ID;
+        const signal = computeSignal(symbol, bars, settings.riskProfile, conditionId);
         const latest = latestBySymbol.get(symbol);
 
         return {
@@ -120,7 +129,7 @@ app.get('/api/trading/chart/:symbol', async (req, res) => {
   const pool = createPostgresPool(loadPostgresConfig());
 
   try {
-    const bars = await getRecentBars(pool, symbol, CHART_LOOKBACK_BARS);
+    const bars = await getRecentOhlcBars(pool, symbol, CHART_LOOKBACK_BARS);
     const points = buildChartSeries(bars);
 
     res.json({ ok: true, symbol, points });
@@ -275,6 +284,43 @@ app.get('/api/backtesting/results', async (_req, res) => {
     await setupBacktestSchema(pool);
     const run = await getLatestBacktestRun(pool);
     res.json({ ok: true, generatedAt: new Date().toISOString(), run });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/conditions', async (_req, res) => {
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupConditionSchema(pool);
+    const symbolConditions = await getSymbolConditions(pool);
+
+    const conditions = WATCHLIST.map((symbol) => {
+      const row = symbolConditions.get(symbol);
+      const condition = CONDITIONS.find((c) => c.id === (row?.conditionId ?? DEFAULT_CONDITION_ID)) ?? CONDITIONS[0];
+
+      return {
+        symbol,
+        conditionId: row?.conditionId ?? condition.id,
+        conditionLabel: row?.conditionLabel ?? condition.label,
+        trades: row?.trades ?? 0,
+        winRatePct: row?.winRatePct ?? null,
+        totalReturnPct: row?.totalReturnPct ?? 0,
+        avgReturnPct: row?.avgReturnPct ?? null,
+        maxDrawdownPct: row?.maxDrawdownPct ?? 0,
+        updatedAt: row?.updatedAt ?? null,
+      };
+    });
+
+    res.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      conditions,
+      catalog: CONDITIONS.map((c) => ({ id: c.id, label: c.label })),
+    });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

@@ -28,6 +28,8 @@ export interface SymbolAssessmentContext {
   momentum: number | null;
   estimatedEntryPrice: number | null;
   estimatedExitPrice: number | null;
+  conditionId: string;
+  conditionLabel: string;
   fundamentals: CompanyProfile | null;
   news: { headline: string; summary: string; publishedAt: string }[];
 }
@@ -98,7 +100,7 @@ function buildPrompt(symbols: SymbolAssessmentContext[], macro: MacroObservation
 
     return [
       `### ${s.symbol} (${s.type})`,
-      `Señal técnica: ${s.signal} | Precio: ${s.price} | SMA10: ${s.smaFast ?? 'n/a'} | SMA30: ${s.smaSlow ?? 'n/a'} | RSI14: ${s.rsi ?? 'n/a'} | Momentum10: ${s.momentum ?? 'n/a'}%`,
+      `Señal técnica: ${s.signal} | Condición activa: ${s.conditionLabel} | Precio: ${s.price} | SMA10: ${s.smaFast ?? 'n/a'} | SMA30: ${s.smaSlow ?? 'n/a'} | RSI14: ${s.rsi ?? 'n/a'} | Momentum10: ${s.momentum ?? 'n/a'}%`,
       `Precio est. entrada (algorítmico): ${s.estimatedEntryPrice ?? 'n/a'} | Precio est. salida (algorítmico): ${s.estimatedExitPrice ?? 'n/a'}`,
       `Fundamentales: ${fundamentals}`,
       'Noticias recientes:',
@@ -108,7 +110,10 @@ function buildPrompt(symbols: SymbolAssessmentContext[], macro: MacroObservation
 
   return [
     'Eres un analista financiero que revisa las señales de un bot de trading (cuenta PAPER de Alpaca) ' +
-      'basado en un cruce de medias móviles SMA10/SMA30 confirmado por RSI14 y momentum10.',
+      'basado en condiciones de análisis técnico clásicas (cruces de medias, MACD, RSI, Bollinger, ' +
+      'estocástico, Williams %R, CCI, Donchian, etc.), una condición por símbolo elegida según ' +
+      'backtests propios (ver "Condición activa" en cada símbolo). SMA10/SMA30/RSI14/Momentum10 se ' +
+      'muestran siempre como contexto general, independientemente de la condición activa.',
     '',
     'Tu evaluación SOLO se usa como FILTRO de veto sobre señales BUY ya generadas por la estrategia: ' +
       'una recomendación "avoid" bloquea esa compra (acción AI_BLOCKED). No genera compras nuevas, ' +

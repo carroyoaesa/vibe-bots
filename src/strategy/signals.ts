@@ -1,5 +1,5 @@
-import { sma, rsi, momentum, estimateEntryPrice } from './indicators';
-import { STRATEGY_PARAMS, RISK_PROFILE, RiskProfile } from './config';
+import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, OhlcBar } from './conditions';
+import { RISK_PROFILE, RiskProfile } from './config';
 
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD';
 
@@ -14,19 +14,31 @@ export interface SignalResult {
   estimatedExitPrice: number | null;
   signal: SignalAction;
   reason: string;
+  conditionId: string;
+  conditionLabel: string;
 }
 
-/**
- * Estrategia Fase 2: cruce de medias móviles (SMA10/SMA30) confirmado por RSI y momentum.
- *
- * - BUY: SMA rápida cruza por encima de la lenta, sin sobrecompra (RSI < umbral) y con momentum positivo.
- * - SELL: SMA rápida cruza por debajo de la lenta (señal de salida de tendencia).
- * - HOLD: sin cruce, o datos históricos insuficientes.
- */
-export function computeSignal(symbol: string, closes: number[], riskProfile: RiskProfile = RISK_PROFILE): SignalResult {
-  const { smaFastPeriod, smaSlowPeriod, rsiPeriod, rsiOverbought, momentumPeriod } = STRATEGY_PARAMS;
+// Mínimo de velas para que SMA50 (el indicador de mayor período entre las 12
+// condiciones de strategy/conditions.ts) esté disponible en `i` e `i-1`.
+const MIN_BARS = 51;
 
-  if (closes.length === 0) {
+/**
+ * Señal de trading para `symbol` según la condición de estado activa (Fase 6,
+ * `symbol_conditions` -> `conditionId`, default `DEFAULT_CONDITION_ID`).
+ *
+ * SMA10/SMA30/RSI14/Momentum10 se calculan siempre como contexto general (no
+ * dependen de la condición activa) - se usan en el dashboard, `attractivenessScore`
+ * y el contexto de IA, independientemente de qué condición genera la señal.
+ */
+export function computeSignal(
+  symbol: string,
+  bars: OhlcBar[],
+  riskProfile: RiskProfile = RISK_PROFILE,
+  conditionId: string = DEFAULT_CONDITION_ID
+): SignalResult {
+  const condition = CONDITIONS.find((c) => c.id === conditionId) ?? CONDITIONS[0];
+
+  if (bars.length === 0) {
     return {
       symbol,
       price: 0,
@@ -38,79 +50,52 @@ export function computeSignal(symbol: string, closes: number[], riskProfile: Ris
       estimatedExitPrice: null,
       signal: 'HOLD',
       reason: 'Sin datos en market_bars (ejecutar npm run ingest primero)',
+      conditionId: condition.id,
+      conditionLabel: condition.label,
     };
   }
 
-  const price = closes[closes.length - 1];
-  const smaFast = sma(closes, smaFastPeriod);
-  const smaSlow = sma(closes, smaSlowPeriod);
-  const smaFastPrev = sma(closes.slice(0, -1), smaFastPeriod);
-  const smaSlowPrev = sma(closes.slice(0, -1), smaSlowPeriod);
-  const rsiValue = rsi(closes, rsiPeriod);
-  const momentumValue = momentum(closes, momentumPeriod);
-
-  if (smaFast === null || smaSlow === null || smaFastPrev === null || smaSlowPrev === null) {
+  if (bars.length < MIN_BARS) {
     return {
       symbol,
-      price,
-      smaFast,
-      smaSlow,
-      rsi: rsiValue,
-      momentum: momentumValue,
+      price: bars[bars.length - 1].close,
+      smaFast: null,
+      smaSlow: null,
+      rsi: null,
+      momentum: null,
       estimatedEntryPrice: null,
       estimatedExitPrice: null,
       signal: 'HOLD',
-      reason: `Histórico insuficiente para SMA${smaSlowPeriod} (se requieren ${smaSlowPeriod + 1} cierres)`,
+      reason: `Histórico insuficiente para calcular indicadores (mínimo ${MIN_BARS} velas)`,
+      conditionId: condition.id,
+      conditionLabel: condition.label,
     };
   }
 
-  const estimatedEntryPrice = estimateEntryPrice(closes, smaFastPeriod, smaSlow);
-  // Precio objetivo de salida (take-profit) a partir del precio estimado de entrada.
+  const ctx = buildIndicatorContext(bars);
+  const i = bars.length - 1;
+
+  const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, condition.id);
   const estimatedExitPrice = estimatedEntryPrice !== null ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct) : null;
 
-  const crossedUp = smaFastPrev <= smaSlowPrev && smaFast > smaSlow;
-  const crossedDown = smaFastPrev >= smaSlowPrev && smaFast < smaSlow;
-
-  if (crossedUp && (rsiValue === null || rsiValue < rsiOverbought) && (momentumValue === null || momentumValue > 0)) {
-    return {
-      symbol,
-      price,
-      smaFast,
-      smaSlow,
-      rsi: rsiValue,
-      momentum: momentumValue,
-      estimatedEntryPrice,
-      estimatedExitPrice,
-      signal: 'BUY',
-      reason: `SMA${smaFastPeriod} cruzó sobre SMA${smaSlowPeriod}, RSI=${rsiValue?.toFixed(1) ?? 'n/a'}, momentum=${momentumValue?.toFixed(2) ?? 'n/a'}%`,
-    };
-  }
-
-  if (crossedDown) {
-    return {
-      symbol,
-      price,
-      smaFast,
-      smaSlow,
-      rsi: rsiValue,
-      momentum: momentumValue,
-      estimatedEntryPrice,
-      estimatedExitPrice,
-      signal: 'SELL',
-      reason: `SMA${smaFastPeriod} cruzó bajo SMA${smaSlowPeriod}`,
-    };
-  }
+  const action = condition.evaluate(ctx, i);
+  const details = condition.describe(ctx, i);
+  const reason = action === 'HOLD'
+    ? `Sin señal (condición activa: "${condition.label}"; ${details})`
+    : `${action} por "${condition.label}" (${details})`;
 
   return {
     symbol,
-    price,
-    smaFast,
-    smaSlow,
-    rsi: rsiValue,
-    momentum: momentumValue,
+    price: ctx.closes[i],
+    smaFast: ctx.sma10[i],
+    smaSlow: ctx.sma30[i],
+    rsi: ctx.rsi14[i],
+    momentum: ctx.momentum10[i],
     estimatedEntryPrice,
     estimatedExitPrice,
-    signal: 'HOLD',
-    reason: 'Sin cruce de medias móviles',
+    signal: action,
+    reason,
+    conditionId: condition.id,
+    conditionLabel: condition.label,
   };
 }

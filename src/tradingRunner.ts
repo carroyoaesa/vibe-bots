@@ -12,7 +12,7 @@ import {
   ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS,
 } from './services/cache';
 import {
-  getCloses,
+  getRecentOhlcBars,
   getLatestFundamentals,
   getRecentNewsForSymbol,
   getLatestMacroObservations,
@@ -30,11 +30,15 @@ import {
 } from './services/alpaca';
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './services/tradingStore';
 import { computeSignal, SignalResult } from './strategy/signals';
+import { DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
+import { setupConditionSchema, getSymbolConditions } from './services/conditionStore';
 import { WATCHLIST, ETF_SYMBOLS, MACRO_SERIES } from './watchlist';
 import { createAnthropicClient, assessWatchlist, SymbolAssessment, SymbolAssessmentContext } from './services/claude';
 
-const CLOSES_LOOKBACK = 60;
+// Velas (OHLC diarias) pedidas por símbolo para calcular la condición activa (Fase 6):
+// suficiente warm-up para SMA50/EMA26/MACD/Bollinger/Stochastic/CCI/Donchian.
+const BARS_LOOKBACK = 100;
 const NEWS_LOOKBACK = 5;
 
 export type TradingAction =
@@ -82,7 +86,9 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
   try {
     await setupTradingSchema(pool);
     await setupSettingsSchema(pool);
+    await setupConditionSchema(pool);
     const settings = await getSettings(pool);
+    const symbolConditions = await getSymbolConditions(pool);
 
     const account = await getAccount(alpacaClient);
     const positions = await getPositions(alpacaClient);
@@ -112,8 +118,9 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     // así quedan disponibles para la fase de IA antes de guardar/ejecutar nada.
     const signals: SignalResult[] = [];
     for (const symbol of WATCHLIST) {
-      const closes = await getCloses(pool, symbol, CLOSES_LOOKBACK);
-      signals.push(computeSignal(symbol, closes, settings.riskProfile));
+      const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
+      const conditionId = symbolConditions.get(symbol)?.conditionId ?? DEFAULT_CONDITION_ID;
+      signals.push(computeSignal(symbol, bars, settings.riskProfile, conditionId));
     }
 
     // Fase de IA (Claude): una sola evaluación batched del watchlist completo. Fail-open:
@@ -145,6 +152,8 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
               momentum: signal.momentum,
               estimatedEntryPrice: signal.estimatedEntryPrice,
               estimatedExitPrice: signal.estimatedExitPrice,
+              conditionId: signal.conditionId,
+              conditionLabel: signal.conditionLabel,
               fundamentals,
               news: news.map((item) => ({
                 headline: item.headline,

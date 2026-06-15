@@ -1,9 +1,11 @@
 import { Pool } from 'pg';
 import { WATCHLIST } from './watchlist';
 import { getAllBars } from './services/marketStore';
-import { runBacktest, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
+import { runBacktest, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
+import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { saveBacktestRun } from './services/backtestStore';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
+import { setupConditionSchema, saveSymbolConditions, SymbolConditionPick } from './services/conditionStore';
 import { STRATEGY_PARAMS } from './strategy/config';
 
 export interface PortfolioBacktestSummary {
@@ -26,12 +28,16 @@ export interface BacktestRunResult {
 
 export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunResult> {
   await setupSettingsSchema(pool);
+  await setupConditionSchema(pool);
   const settings = await getSettings(pool);
 
   const symbolSummaries: SymbolBacktestSummary[] = [];
   const trades: BacktestTrade[] = [];
+  const picks: SymbolConditionPick[] = [];
   let startDate: string | null = null;
   let endDate: string | null = null;
+
+  const defaultCondition = CONDITIONS.find((c) => c.id === DEFAULT_CONDITION_ID) ?? CONDITIONS[0];
 
   for (const symbol of WATCHLIST) {
     const bars = await getAllBars(pool, symbol);
@@ -47,6 +53,16 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
         avgReturnPct: null,
         maxDrawdownPct: 0,
       });
+      picks.push({
+        symbol,
+        conditionId: defaultCondition.id,
+        conditionLabel: defaultCondition.label,
+        trades: 0,
+        winRatePct: null,
+        totalReturnPct: 0,
+        avgReturnPct: null,
+        maxDrawdownPct: 0,
+      });
       continue;
     }
 
@@ -55,9 +71,35 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
     if (startDate === null || firstDate < startDate) startDate = firstDate;
     if (endDate === null || lastDate > endDate) endDate = lastDate;
 
-    const result = runBacktest(symbol, bars, settings.riskProfile);
-    symbolSummaries.push(result.summary);
-    trades.push(...result.trades);
+    // Corre las 12 condiciones con el motor real de vibe-bots (orden límite, fill solo si el
+    // low de la sesión siguiente toca el precio límite) y elige la de mayor retorno total
+    // entre las que operaron al menos una vez. Si ninguna operó, queda DEFAULT_CONDITION_ID
+    // (trades: 0) = comportamiento histórico.
+    let best: BacktestResult = runBacktest(symbol, bars, settings.riskProfile, defaultCondition.id);
+    let bestCondition = defaultCondition;
+
+    for (const condition of CONDITIONS) {
+      if (condition.id === defaultCondition.id) continue;
+
+      const result = runBacktest(symbol, bars, settings.riskProfile, condition.id);
+      if (result.summary.trades > 0 && (best.summary.trades === 0 || result.summary.totalReturnPct > best.summary.totalReturnPct)) {
+        best = result;
+        bestCondition = condition;
+      }
+    }
+
+    symbolSummaries.push(best.summary);
+    trades.push(...best.trades);
+    picks.push({
+      symbol,
+      conditionId: bestCondition.id,
+      conditionLabel: bestCondition.label,
+      trades: best.summary.trades,
+      winRatePct: best.summary.winRate,
+      totalReturnPct: best.summary.totalReturnPct,
+      avgReturnPct: best.summary.avgReturnPct,
+      maxDrawdownPct: best.summary.maxDrawdownPct,
+    });
   }
 
   const withTrades = symbolSummaries.filter((s) => s.trades > 0);
@@ -95,7 +137,11 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
     symbols: WATCHLIST,
     startDate,
     endDate,
-    params: { strategy: STRATEGY_PARAMS, risk: settings.riskProfile },
+    params: {
+      strategy: STRATEGY_PARAMS,
+      risk: settings.riskProfile,
+      conditions: picks.map((p) => ({ symbol: p.symbol, conditionId: p.conditionId })),
+    },
     summary: { symbols: symbolSummaries, portfolio },
     trades: trades.map((trade) => ({
       symbol: trade.symbol,
@@ -107,6 +153,8 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
       pnlPct: trade.pnlPct,
     })),
   });
+
+  await saveSymbolConditions(pool, picks);
 
   return { runId, startDate, endDate, symbolSummaries, portfolio, trades };
 }
