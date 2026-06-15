@@ -129,7 +129,13 @@
       <div class="table-wrap">
         <table id="signals-summary-table">
           <thead>
-            <tr><th>Símbolo</th><th>Tipo</th><th>Señal</th><th>Condición activa</th><th>Motivo</th></tr>
+            <tr>
+              <th data-sort-key="symbol">Símbolo</th>
+              <th data-sort-key="type">Tipo</th>
+              <th data-sort-key="signal">Señal</th>
+              <th data-sort-key="condition">Condición activa</th>
+              <th data-sort-key="reason">Motivo</th>
+            </tr>
           </thead>
           <tbody></tbody>
         </table>
@@ -141,14 +147,14 @@
         <table id="conditions-table">
           <thead>
             <tr>
-              <th>Símbolo</th>
-              <th>Condición</th>
-              <th>Trades</th>
-              <th>Win rate</th>
-              <th title="Retorno acumulado (compuesto) de todas las operaciones de esa condición durante el período del backtest, no es por operación">Retorno total</th>
-              <th title="Retorno promedio de cada operación individual">Retorno prom.</th>
-              <th>Max DD</th>
-              <th>Actualizado</th>
+              <th data-sort-key="symbol">Símbolo</th>
+              <th data-sort-key="condition">Condición</th>
+              <th data-sort-key="trades">Trades</th>
+              <th data-sort-key="winRate">Win rate</th>
+              <th data-sort-key="totalReturn" title="Retorno acumulado (compuesto) de todas las operaciones de esa condición durante el período del backtest, no es por operación">Retorno total</th>
+              <th data-sort-key="avgReturn" title="Retorno promedio de cada operación individual">Retorno prom.</th>
+              <th data-sort-key="maxDD">Max DD</th>
+              <th data-sort-key="updatedAt">Actualizado</th>
             </tr>
           </thead>
           <tbody></tbody>

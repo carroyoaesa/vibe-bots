@@ -214,6 +214,25 @@ th {
   font-weight: 600;
 }
 
+th[data-sort-key] {
+  cursor: pointer;
+  user-select: none;
+}
+
+th[data-sort-key]:hover {
+  color: #c7c9cc;
+}
+
+th[data-sort-key].sort-active {
+  color: #4a82f0;
+}
+
+.sort-arrow {
+  display: inline-block;
+  margin-left: 0.25rem;
+  font-size: 0.7rem;
+}
+
 td.muted {
   white-space: normal;
 }

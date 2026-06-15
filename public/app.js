@@ -754,58 +754,133 @@ function renderBacktestingSummary(run) {
     `no el resultado de una sola operación. "Retorno prom." es el promedio por operación individual (columna "Trades").`;
 }
 
-function renderSignalsSummaryTable(signals, conditionsBySymbol) {
-  signalsSummaryTableBody.innerHTML = '';
-  if (signals.length === 0) {
-    signalsSummaryTableBody.innerHTML = '<tr><td colspan="5" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
-    return;
+/**
+ * Tablas ordenables por columna (click en el encabezado): columnas `string`
+ * se ordenan alfabéticamente (`localeCompare`), columnas `number` de forma
+ * numérica (`null`/`undefined` van al final en ascendente). Un segundo click
+ * en la misma columna invierte el sentido.
+ */
+const SIGNALS_TABLE_COLUMNS = [
+  { key: 'symbol', type: 'string', getValue: (s) => s.symbol },
+  { key: 'type', type: 'string', getValue: (s) => s.type },
+  { key: 'signal', type: 'string', getValue: (s) => s.signal },
+  { key: 'condition', type: 'string', getValue: (s) => s.conditionLabel ?? '' },
+  { key: 'reason', type: 'string', getValue: (s) => s.reason ?? '' },
+];
+
+const CONDITIONS_TABLE_COLUMNS = [
+  { key: 'symbol', type: 'string', getValue: (c) => c.symbol },
+  { key: 'condition', type: 'string', getValue: (c) => c.conditionLabel },
+  { key: 'trades', type: 'number', getValue: (c) => c.trades },
+  { key: 'winRate', type: 'number', getValue: (c) => c.winRatePct },
+  { key: 'totalReturn', type: 'number', getValue: (c) => c.totalReturnPct },
+  { key: 'avgReturn', type: 'number', getValue: (c) => c.avgReturnPct },
+  { key: 'maxDD', type: 'number', getValue: (c) => c.maxDrawdownPct },
+  { key: 'updatedAt', type: 'number', getValue: (c) => (c.updatedAt ? new Date(c.updatedAt).getTime() : null) },
+];
+
+// Orden inicial: "Resumen de señales" agrupado por Condición activa (a-z).
+const signalsSortState = { key: 'condition', direction: 'asc' };
+const conditionsSortState = { key: null, direction: 'asc' };
+
+let latestSignals = [];
+let latestConditions = [];
+
+function compareValues(va, vb, type, direction) {
+  const dir = direction === 'desc' ? -1 : 1;
+  if (type === 'number') {
+    const na = va === null || va === undefined ? -Infinity : va;
+    const nb = vb === null || vb === undefined ? -Infinity : vb;
+    if (na < nb) return -1 * dir;
+    if (na > nb) return 1 * dir;
+    return 0;
   }
+  return String(va ?? '').localeCompare(String(vb ?? '')) * dir;
+}
 
-  // Orden: agrupados por "Condición activa" (alfabético) y, dentro de cada
-  // grupo, por "Retorno total" del backtest (de mayor a menor).
-  const sorted = [...signals].sort((a, b) => {
-    const labelA = a.conditionLabel ?? '';
-    const labelB = b.conditionLabel ?? '';
-    if (labelA !== labelB) return labelA.localeCompare(labelB);
-    const retA = conditionsBySymbol.get(a.symbol)?.totalReturnPct ?? -Infinity;
-    const retB = conditionsBySymbol.get(b.symbol)?.totalReturnPct ?? -Infinity;
-    return retB - retA;
-  });
+function sortRows(rows, columns, sortState) {
+  if (!sortState.key) return rows;
+  const column = columns.find((c) => c.key === sortState.key);
+  if (!column) return rows;
+  return [...rows].sort((a, b) => compareValues(column.getValue(a), column.getValue(b), column.type, sortState.direction));
+}
 
-  sorted.forEach((signal) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${signal.symbol}</td>
-      <td>${signal.type}</td>
-      <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
-      <td>${conditionBadge(signal.conditionId, signal.conditionLabel)}</td>
-      <td class="muted">${signal.reason}</td>
-    `;
-    signalsSummaryTableBody.appendChild(tr);
+function updateSortIndicators(tableId, sortState) {
+  document.querySelectorAll(`#${tableId} thead th[data-sort-key]`).forEach((th) => {
+    let arrow = th.querySelector('.sort-arrow');
+    if (!arrow) {
+      arrow = document.createElement('span');
+      arrow.className = 'sort-arrow';
+      th.appendChild(arrow);
+    }
+    if (th.dataset.sortKey === sortState.key) {
+      th.classList.add('sort-active');
+      arrow.textContent = sortState.direction === 'asc' ? '▲' : '▼';
+    } else {
+      th.classList.remove('sort-active');
+      arrow.textContent = '';
+    }
   });
 }
 
-function renderConditionsTable(conditions) {
-  conditionsTableBody.innerHTML = '';
-  if (!conditions || conditions.length === 0) {
-    conditionsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
-    return;
-  }
-
-  conditions.forEach((c) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${c.symbol}</td>
-      <td>${conditionBadge(c.conditionId, c.conditionLabel)}</td>
-      <td>${c.trades}</td>
-      <td>${c.winRatePct !== null ? `${fmtNum(c.winRatePct, 1)}%` : '—'}</td>
-      <td class="${c.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(c.totalReturnPct)}%</td>
-      <td>${c.avgReturnPct !== null ? `${fmtNum(c.avgReturnPct)}%` : '—'}</td>
-      <td>${fmtNum(c.maxDrawdownPct)}%</td>
-      <td>${c.updatedAt ? new Date(c.updatedAt).toLocaleString() : '—'}</td>
-    `;
-    conditionsTableBody.appendChild(tr);
+function setupSortableTable(tableId, sortState, onChange) {
+  document.querySelectorAll(`#${tableId} thead th[data-sort-key]`).forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortKey;
+      if (sortState.key === key) {
+        sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortState.key = key;
+        sortState.direction = 'asc';
+      }
+      onChange();
+    });
   });
+}
+
+function renderSignalsSummaryTable() {
+  signalsSummaryTableBody.innerHTML = '';
+  if (latestSignals.length === 0) {
+    signalsSummaryTableBody.innerHTML = '<tr><td colspan="5" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+  } else {
+    const sorted = sortRows(latestSignals, SIGNALS_TABLE_COLUMNS, signalsSortState);
+    sorted.forEach((signal) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${signal.symbol}</td>
+        <td>${signal.type}</td>
+        <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
+        <td>${conditionBadge(signal.conditionId, signal.conditionLabel)}</td>
+        <td class="muted">${signal.reason}</td>
+      `;
+      signalsSummaryTableBody.appendChild(tr);
+    });
+  }
+  updateSortIndicators('signals-summary-table', signalsSortState);
+}
+
+function renderConditionsTable() {
+  conditionsTableBody.innerHTML = '';
+  if (latestConditions.length === 0) {
+    conditionsTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
+  } else {
+    const sorted = sortRows(latestConditions, CONDITIONS_TABLE_COLUMNS, conditionsSortState);
+    sorted.forEach((c) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${c.symbol}</td>
+        <td>${conditionBadge(c.conditionId, c.conditionLabel)}</td>
+        <td>${c.trades}</td>
+        <td>${c.winRatePct !== null ? `${fmtNum(c.winRatePct, 1)}%` : '—'}</td>
+        <td class="${c.totalReturnPct >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtNum(c.totalReturnPct)}%</td>
+        <td>${c.avgReturnPct !== null ? `${fmtNum(c.avgReturnPct)}%` : '—'}</td>
+        <td>${fmtNum(c.maxDrawdownPct)}%</td>
+        <td>${c.updatedAt ? new Date(c.updatedAt).toLocaleString() : '—'}</td>
+      `;
+      conditionsTableBody.appendChild(tr);
+    });
+  }
+  updateSortIndicators('conditions-table', conditionsSortState);
 }
 
 async function loadSymbolReports() {
@@ -848,10 +923,10 @@ async function loadSymbolReports() {
       (run?.run?.summary?.symbols ?? []).map((s) => [s.symbol, s])
     );
 
-    const conditionsList = conditionsData.ok ? conditionsData.conditions : [];
-    const conditionsBySymbol = new Map(conditionsList.map((c) => [c.symbol, c]));
-    renderSignalsSummaryTable(signals, conditionsBySymbol);
-    renderConditionsTable(conditionsList);
+    latestSignals = signals;
+    latestConditions = conditionsData.ok ? conditionsData.conditions : [];
+    renderSignalsSummaryTable();
+    renderConditionsTable();
 
     const etfSignals = signals.filter((signal) => signal.type === 'ETF').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
     const stockSignals = signals.filter((signal) => signal.type === 'STOCK').sort((a, b) => attractivenessScore(b) - attractivenessScore(a));
@@ -974,6 +1049,9 @@ riskPresetSelect.addEventListener('change', () => {
     riskPresetSelect.value = 'personalizado';
   });
 });
+
+setupSortableTable('signals-summary-table', signalsSortState, renderSignalsSummaryTable);
+setupSortableTable('conditions-table', conditionsSortState, renderConditionsTable);
 
 loadHealth();
 loadSettings();
