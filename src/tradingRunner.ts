@@ -126,57 +126,75 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId));
     }
 
-    // Fase de IA (Claude): una sola evaluación batched del watchlist completo. Fail-open:
-    // si falta ANTHROPIC_API_KEY o falla la llamada, se loguea y el ciclo sigue sin gating
-    // (igual que antes de la Fase 4). No se extiende a `hybridSignals` (Tier 2/sombra).
+    // Fase de IA (Claude): gate de optimización de tokens.
+    // - Primera llamada del día (según Redis `claude:last_run_date`): siempre se ejecuta,
+    //   para tener evaluaciones frescas de referencia aunque no haya señales BUY.
+    // - Llamadas siguientes (mismo día): solo si existe al menos 1 señal BUY — es el único
+    //   caso donde Claude puede generar una acción (vetar o confirmar la compra). Para
+    //   señales HOLD/SELL Claude no hace nada, así que no tiene sentido gastar tokens.
+    // Fail-open: si falta ANTHROPIC_API_KEY o falla la llamada, el ciclo sigue sin gating.
+    const CLAUDE_LAST_RUN_KEY = 'claude:last_run_date';
+    const todayStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
+    const lastRunDate = await redis.get(CLAUDE_LAST_RUN_KEY).catch(() => null);
+    const isFirstRunToday = lastRunDate !== todayStr;
+    const hasBuySignals = signals.some((s) => s.signal === 'BUY');
+
     let assessments = new Map<string, SymbolAssessment>();
     let assessmentModel: string | null = null;
-    try {
-      const anthropicConfig = loadAnthropicConfig();
-      const anthropicClient = createAnthropicClient(anthropicConfig);
 
-      const [contexts, macro] = await Promise.all([
-        Promise.all(
-          WATCHLIST.map(async (symbol, index): Promise<SymbolAssessmentContext> => {
-            const signal = signals[index];
-            const [fundamentals, news] = await Promise.all([
-              getLatestFundamentals(pool, symbol),
-              getRecentNewsForSymbol(pool, symbol, NEWS_LOOKBACK),
-            ]);
+    if (!isFirstRunToday && !hasBuySignals) {
+      console.log(`Fase de IA (Claude) saltada: ya se ejecutó hoy (${lastRunDate ?? 'n/a'}) y no hay señales BUY`);
+    } else {
+      try {
+        const anthropicConfig = loadAnthropicConfig();
+        const anthropicClient = createAnthropicClient(anthropicConfig);
 
-            return {
-              symbol,
-              type: ETF_SYMBOLS.includes(symbol) ? 'ETF' : 'STOCK',
-              signal: signal.signal,
-              price: signal.price,
-              smaFast: signal.smaFast,
-              smaSlow: signal.smaSlow,
-              rsi: signal.rsi,
-              momentum: signal.momentum,
-              estimatedEntryPrice: signal.estimatedEntryPrice,
-              estimatedExitPrice: signal.estimatedExitPrice,
-              buyConditionId: signal.buyConditionId,
-              buyConditionLabel: signal.buyConditionLabel,
-              sellConditionId: signal.sellConditionId,
-              sellConditionLabel: signal.sellConditionLabel,
-              fundamentals,
-              news: news.map((item) => ({
-                headline: item.headline,
-                summary: item.summary,
-                publishedAt: item.publishedAt,
-              })),
-            };
-          })
-        ),
-        getLatestMacroObservations(pool, MACRO_SERIES),
-      ]);
+        const [contexts, macro] = await Promise.all([
+          Promise.all(
+            WATCHLIST.map(async (symbol, index): Promise<SymbolAssessmentContext> => {
+              const signal = signals[index];
+              const [fundamentals, news] = await Promise.all([
+                getLatestFundamentals(pool, symbol),
+                getRecentNewsForSymbol(pool, symbol, NEWS_LOOKBACK),
+              ]);
 
-      const model = settings.claudeModel || anthropicConfig.model;
-      const results = await assessWatchlist(anthropicClient, model, contexts, macro);
-      assessments = new Map(results.map((result) => [result.symbol, result]));
-      assessmentModel = model;
-    } catch (error) {
-      console.warn('Fase de IA (Claude) omitida en este ciclo:', error instanceof Error ? error.message : error);
+              return {
+                symbol,
+                type: ETF_SYMBOLS.includes(symbol) ? 'ETF' : 'STOCK',
+                signal: signal.signal,
+                price: signal.price,
+                smaFast: signal.smaFast,
+                smaSlow: signal.smaSlow,
+                rsi: signal.rsi,
+                momentum: signal.momentum,
+                estimatedEntryPrice: signal.estimatedEntryPrice,
+                estimatedExitPrice: signal.estimatedExitPrice,
+                buyConditionId: signal.buyConditionId,
+                buyConditionLabel: signal.buyConditionLabel,
+                sellConditionId: signal.sellConditionId,
+                sellConditionLabel: signal.sellConditionLabel,
+                fundamentals,
+                news: news.map((item) => ({
+                  headline: item.headline,
+                  summary: item.summary,
+                  publishedAt: item.publishedAt,
+                })),
+              };
+            })
+          ),
+          getLatestMacroObservations(pool, MACRO_SERIES),
+        ]);
+
+        const model = settings.claudeModel || anthropicConfig.model;
+        const results = await assessWatchlist(anthropicClient, model, contexts, macro);
+        assessments = new Map(results.map((result) => [result.symbol, result]));
+        assessmentModel = model;
+
+        // Registrar fecha de última llamada exitosa (TTL 48h para auto-expiración segura)
+        await redis.set(CLAUDE_LAST_RUN_KEY, todayStr, 'EX', 172800).catch(() => {});
+      } catch (error) {
+        console.warn('Fase de IA (Claude) omitida en este ciclo:', error instanceof Error ? error.message : error);
+      }
     }
 
     const actions: TradingAction[] = [];
