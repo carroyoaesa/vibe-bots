@@ -1,13 +1,13 @@
 import { Pool } from 'pg';
 import { WATCHLIST } from './watchlist';
-import { getAllBars, getAllBars1H } from './services/marketStore';
-import { runCombinedBacktest, runCombinedBacktest1H, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
+import { getAllBars } from './services/marketStore';
+import { runCombinedBacktest, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { saveBacktestRun } from './services/backtestStore';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
-import { setupConditionSchema, saveSymbolConditions, deleteSymbolConditionsForTimeframe, SymbolConditionPick } from './services/conditionStore';
+import { setupConditionSchema, saveSymbolConditions, SymbolConditionPick } from './services/conditionStore';
 import { STRATEGY_PARAMS } from './strategy/config';
-import { HYBRID_CONFIG, TIER1_SYMBOLS } from './strategy/hybridConfig';
+import { HYBRID_CONFIG } from './strategy/hybridConfig';
 
 export interface PortfolioBacktestSummary {
   symbols: number;
@@ -51,41 +51,11 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
       if (endDate === null || lastDate > endDate) endDate = lastDate;
     }
 
-    if (hybrid?.tier === 1) {
-      // Tier 1 (SPY, XLU): skip 144-combo — use HYBRID_CONFIG 1H combo as the sole pick.
-      // This result feeds symbolSummaries/trades/portfolio (replaces the 1D pick entirely).
-      const bars1h = await getAllBars1H(pool, symbol);
-
-      if (bars1h.length === 0) {
-        symbolSummaries.push({ symbol, trades: 0, wins: 0, losses: 0, winRate: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
-        const buyCondition = CONDITIONS.find((c) => c.id === hybrid.buyConditionId) ?? CONDITIONS[0];
-        const sellCondition = CONDITIONS.find((c) => c.id === hybrid.sellConditionId) ?? CONDITIONS[0];
-        picks.push({ symbol, timeframe: '1Hour', buyConditionId: hybrid.buyConditionId, buyConditionLabel: buyCondition.label, sellConditionId: hybrid.sellConditionId, sellConditionLabel: sellCondition.label, trades: 0, winRatePct: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
-        continue;
-      }
-
-      const result = runCombinedBacktest1H(symbol, bars1h, settings.riskProfile, hybrid.buyConditionId, hybrid.sellConditionId, settings.exitMode);
-      symbolSummaries.push(result.summary);
-      trades.push(...result.trades);
-
-      const buyCondition = CONDITIONS.find((c) => c.id === hybrid.buyConditionId) ?? CONDITIONS[0];
-      const sellCondition = CONDITIONS.find((c) => c.id === hybrid.sellConditionId) ?? CONDITIONS[0];
-      picks.push({
-        symbol,
-        timeframe: '1Hour',
-        buyConditionId: hybrid.buyConditionId,
-        buyConditionLabel: buyCondition.label,
-        sellConditionId: hybrid.sellConditionId,
-        sellConditionLabel: sellCondition.label,
-        trades: result.summary.trades,
-        winRatePct: result.summary.winRate,
-        totalReturnPct: result.summary.totalReturnPct,
-        avgReturnPct: result.summary.avgReturnPct,
-        maxDrawdownPct: result.summary.maxDrawdownPct,
-      });
-
-    } else if (hybrid) {
-      // Tier 2 (MS, QQQM) / shadow (SCHD): run 144-combo 1D unchanged (pick goes to portfolio)
+    if (hybrid) {
+      // Todos los símbolos híbridos (Tier 1 SPY/XLU, Tier 2 MS/QQQM, shadow SCHD):
+      // el análisis de 5.8 años muestra que 1Day siempre supera a 1Hour en los 20 símbolos,
+      // por lo que el pick de portfolio es siempre el mejor combo 1Day del 144-matrix.
+      // La 1H del HYBRID_CONFIG se guarda como informational pero no alimenta portfolio.
       // plus run HYBRID_CONFIG 1H combo for informational '1Hour' pick (NOT in portfolio).
       if (bars.length === 0) {
         symbolSummaries.push({ symbol, trades: 0, wins: 0, losses: 0, winRate: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
@@ -121,27 +91,6 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
           totalReturnPct: best.summary.totalReturnPct,
           avgReturnPct: best.summary.avgReturnPct,
           maxDrawdownPct: best.summary.maxDrawdownPct,
-        });
-      }
-
-      // 1H informational pick — not in portfolio/symbolSummaries
-      const bars1h = await getAllBars1H(pool, symbol);
-      if (bars1h.length > 0) {
-        const result1h = runCombinedBacktest1H(symbol, bars1h, settings.riskProfile, hybrid.buyConditionId, hybrid.sellConditionId, settings.exitMode);
-        const buyCondition = CONDITIONS.find((c) => c.id === hybrid.buyConditionId) ?? CONDITIONS[0];
-        const sellCondition = CONDITIONS.find((c) => c.id === hybrid.sellConditionId) ?? CONDITIONS[0];
-        picks.push({
-          symbol,
-          timeframe: '1Hour',
-          buyConditionId: hybrid.buyConditionId,
-          buyConditionLabel: buyCondition.label,
-          sellConditionId: hybrid.sellConditionId,
-          sellConditionLabel: sellCondition.label,
-          trades: result1h.summary.trades,
-          winRatePct: result1h.summary.winRate,
-          totalReturnPct: result1h.summary.totalReturnPct,
-          avgReturnPct: result1h.summary.avgReturnPct,
-          maxDrawdownPct: result1h.summary.maxDrawdownPct,
         });
       }
 
@@ -242,7 +191,6 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
   });
 
   await saveSymbolConditions(pool, picks);
-  await deleteSymbolConditionsForTimeframe(pool, TIER1_SYMBOLS, '1Day');
 
   return { runId, startDate, endDate, symbolSummaries, portfolio, trades };
 }

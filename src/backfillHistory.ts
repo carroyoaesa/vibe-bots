@@ -4,9 +4,9 @@ import { createMarketDataClient, getDailyBars } from './services/marketData';
 import { setupIngestSchema, saveDailyBars } from './services/marketStore';
 import { WATCHLIST } from './watchlist';
 
-// ~3 años de historial, para tener suficientes operaciones en el backtest (más allá
-// de los ~220 días que mantiene la ingesta diaria normal para SMA30+RSI14).
-const BACKFILL_DAYS = 1095;
+// 5.8 años de historial (límite real de Alpaca IEX free, verificado 2026-06-16).
+// Suficiente para 10-25 operaciones por símbolo en el combo-matrix de 144 condiciones.
+const BACKFILL_DAYS = 2100;
 
 async function main() {
   console.log(`🤖 Vibe Bots - Backfill histórico (${BACKFILL_DAYS} días, ${WATCHLIST.length} símbolos)\n`);

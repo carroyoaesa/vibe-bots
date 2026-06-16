@@ -128,9 +128,10 @@ function buildPrompt(symbols: SymbolAssessmentContext[], macro: MacroObservation
     '',
     'Tu evaluación SOLO se usa como FILTRO de veto sobre señales BUY ya generadas por la estrategia: ' +
       'una recomendación "avoid" bloquea esa compra (acción AI_BLOCKED). No genera compras nuevas, ' +
-      'no afecta señales SELL ni HOLD. Usa "avoid" solo cuando haya una razón clara para desconfiar ' +
-      'de la señal BUY (noticias muy negativas recientes, fundamentales débiles o contexto macro ' +
-      'claramente adverso para ese símbolo). Si no hay señales de alerta, usa "hold" o "buy".',
+      'no afecta señales SELL ni HOLD. Regla estricta de recomendaciones: ' +
+      'usa "buy" ÚNICAMENTE cuando la "Señal técnica" del símbolo ya es BUY y no hay motivos para vetarla. ' +
+      'Para señales HOLD o SELL usa SIEMPRE "hold" (o "avoid" si hay razón clara de alerta). ' +
+      'Nunca uses "buy" cuando la señal técnica es HOLD o SELL — hacerlo no genera ninguna orden pero confunde el dashboard.',
     '',
     'Contexto macroeconómico (FRED, EE.UU.):',
     macroLines,
