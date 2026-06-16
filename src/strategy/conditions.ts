@@ -321,17 +321,96 @@ export const DEFAULT_CONDITION_ID = CONDITIONS[0].id;
 
 /**
  * Precio estimado de entrada (orden límite) para la condición activa en el bar `i`.
- * - `sma_cross_10_30`/`sma_cross_20_50`: proyección del cierre que haría que la SMA
- *   rápida alcance la SMA lenta actual (`estimateEntryPrice`), igual que la Fase 2.
- * - Las otras 10 condiciones no tienen un análogo de "proyección de cruce": se usa
- *   el cierre actual (`ctx.closes[i]`), es decir orden límite al último precio.
+ *
+ * `scale = 1` para velas diarias; `scale = SCALE_1H` (8) para velas 1H
+ * (`computeEstimatedEntryPrice1H` en `conditions1h.ts`).
+ *
+ * Por condición:
+ * - Cruce de SMAs: precio donde SMA_rápida_next = SMA_lenta_actual (proyección analítica).
+ * - Cruce de EMAs/MACD: precio donde la EMA rápida alcanzaría a la lenta en 1 barra
+ *   (fórmula de actualización EMA: EMA_next = p×k + EMA_curr×(1−k)).
+ * - Bollinger / Donchian / SMA50: el nivel de indicador que activa la señal
+ *   (bbLower, bbUpper, priorHigh20, sma50).
+ * - Estocástico / Williams %R / CCI: precio que llevaría el oscilador al umbral de
+ *   activación, calculado desde los bars del período correspondiente.
+ * - RSI: mantenemos precio actual (el mapeo RSI→precio es path-dependent).
  */
-export function computeEstimatedEntryPrice(ctx: IndicatorContext, i: number, conditionId: string): number | null {
+export function computeEstimatedEntryPrice(ctx: IndicatorContext, i: number, conditionId: string, scale = 1): number | null {
+  const price = ctx.closes[i];
+
+  // --- Cruce SMA (sin cambios) ---
   if (conditionId === 'sma_cross_10_30') {
-    return estimateEntryPrice(ctx.closes.slice(0, i + 1), 10, ctx.sma30[i]);
+    return estimateEntryPrice(ctx.closes.slice(0, i + 1), 10 * scale, ctx.sma30[i]);
   }
   if (conditionId === 'sma_cross_20_50') {
-    return estimateEntryPrice(ctx.closes.slice(0, i + 1), 20, ctx.sma50[i]);
+    return estimateEntryPrice(ctx.closes.slice(0, i + 1), 20 * scale, ctx.sma50[i]);
   }
-  return ctx.closes[i];
+
+  // --- Cruce EMA: precio p donde EMA12_next = EMA26_curr ---
+  // EMA_next = p×k + EMA_curr×(1−k) → igualando ambas: p×(k12−k26) = EMA26×(1−k26) − EMA12×(1−k12)
+  if (conditionId === 'ema_cross_12_26') {
+    const ema12 = ctx.ema12[i];
+    const ema26 = ctx.ema26[i];
+    if (ema12 === null || ema26 === null) return price;
+    const k12 = 2 / (12 * scale + 1);
+    const k26 = 2 / (26 * scale + 1);
+    const p = (ema26 * (1 - k26) - ema12 * (1 - k12)) / (k12 - k26);
+    return p > 0 && p < price * 4 ? p : price;
+  }
+
+  // --- Cruce MACD: precio p donde MACD_next = macdSignal_curr ---
+  // MACD_next = EMA12_next − EMA26_next; igualando a macdSignal:
+  // p×(k12−k26) = macdSignal − EMA12×(1−k12) + EMA26×(1−k26)
+  if (conditionId === 'macd_cross') {
+    const ema12 = ctx.ema12[i];
+    const ema26 = ctx.ema26[i];
+    const signal = ctx.macdSignal[i];
+    if (ema12 === null || ema26 === null || signal === null) return price;
+    const k12 = 2 / (12 * scale + 1);
+    const k26 = 2 / (26 * scale + 1);
+    const p = (signal - ema12 * (1 - k12) + ema26 * (1 - k26)) / (k12 - k26);
+    return p > 0 && p < price * 4 ? p : price;
+  }
+
+  // --- Nivel de indicador directo ---
+  if (conditionId === 'bollinger_reversion') return ctx.bbLower[i] ?? price;   // entrada en banda inferior
+  if (conditionId === 'bollinger_breakout')  return ctx.bbUpper[i] ?? price;   // entrada en nivel de ruptura
+  if (conditionId === 'donchian_breakout_20') return ctx.priorHigh20[i] ?? price; // entrada en máximo Donchian
+  if (conditionId === 'trend_pullback_sma50') return ctx.sma50[i] ?? price;    // entrada cerca del soporte SMA50
+
+  // --- Osciladores: precio en el umbral de activación ---
+
+  // Estocástico: %K = 20 implica Close = Low_period + 0.20 × (High_period − Low_period)
+  if (conditionId === 'stochastic_cross') {
+    const period = 14 * scale;
+    const recentBars = ctx.bars.slice(Math.max(0, i - period + 1), i + 1);
+    const high = Math.max(...recentBars.map((b) => b.high));
+    const low  = Math.min(...recentBars.map((b) => b.low));
+    const range = high - low;
+    return range > 0 ? low + 0.2 * range : price;
+  }
+
+  // Williams %R: %R = −80 → Close = High_period − 0.80 × (High_period − Low_period)
+  if (conditionId === 'williams_r_reversal') {
+    const period = 14 * scale;
+    const recentBars = ctx.bars.slice(Math.max(0, i - period + 1), i + 1);
+    const high = Math.max(...recentBars.map((b) => b.high));
+    const low  = Math.min(...recentBars.map((b) => b.low));
+    const range = high - low;
+    return range > 0 ? high - 0.8 * range : price;
+  }
+
+  // CCI: CCI = −100 → Close = SMA20 − 1.5 × MeanDesviation20
+  if (conditionId === 'cci_reversal') {
+    const sma = ctx.sma20[i];
+    if (sma === null) return price;
+    const period = 20 * scale;
+    const recentCloses = ctx.closes.slice(Math.max(0, i - period + 1), i + 1);
+    const meanDev = recentCloses.reduce((s, c) => s + Math.abs(c - sma), 0) / recentCloses.length;
+    const p = sma - 1.5 * meanDev;
+    return p > 0 ? p : price;
+  }
+
+  // rsi_reversal_30_70: mapeo RSI→precio es path-dependent (avgGain/avgLoss); usamos precio actual
+  return price;
 }

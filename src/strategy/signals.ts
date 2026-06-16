@@ -75,7 +75,10 @@ function computeSignalWith(
   const i = bars.length - 1;
 
   const estimatedEntryPrice = computeEntryPrice(ctx, i, buyCondition.id);
-  const estimatedExitPrice = estimatedEntryPrice !== null ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct) : null;
+  // takeProfitPct=0 → modo signal_only sin TP (p.ej. PARALLEL_RISK_PROFILE): salida indefinida.
+  const estimatedExitPrice = (estimatedEntryPrice !== null && riskProfile.takeProfitPct > 0)
+    ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct)
+    : null;
 
   const buyAction = buyCondition.evaluate(ctx, i);
   const sellAction = sellCondition.evaluate(ctx, i);

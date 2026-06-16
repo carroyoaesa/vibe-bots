@@ -12,6 +12,7 @@
     "trade:cron": "ts-node src/cronTrade.ts",
     "backtest": "ts-node src/backtest.ts",
     "backfill-history": "ts-node src/backfillHistory.ts",
+    "backfill-1h": "ts-node src/backfillHourlyHistory.ts",
     "web": "ts-node src/server.ts",
     "web:start": "./scripts/start-web.sh",
     "web:stop": "./scripts/stop-web.sh",

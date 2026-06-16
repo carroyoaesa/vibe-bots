@@ -1,4 +1,5 @@
-import { buildIndicatorContext, OhlcBar } from './conditions';
+import { buildIndicatorContext, IndicatorContext, OhlcBar } from './conditions';
+import { buildIndicatorContext1H } from './conditions1h';
 
 export interface ChartPoint {
   ts: string;
@@ -30,7 +31,21 @@ export interface ChartPoint {
  * en `public/app.js`).
  */
 export function buildChartSeries(bars: OhlcBar[]): ChartPoint[] {
-  const ctx = buildIndicatorContext(bars);
+  return buildChartSeriesWith(bars, buildIndicatorContext);
+}
+
+/**
+ * Igual que `buildChartSeries`, pero sobre velas de 1 HORA con los períodos de
+ * indicador reescalados por `SCALE_1H=8` (`strategy/conditions1h.ts`). Usado para el
+ * gráfico de los símbolos del sistema híbrido (`strategy/hybridConfig.ts`), cuya
+ * condición activa se evalúa sobre este contexto.
+ */
+export function buildChartSeries1H(bars: OhlcBar[]): ChartPoint[] {
+  return buildChartSeriesWith(bars, buildIndicatorContext1H);
+}
+
+function buildChartSeriesWith(bars: OhlcBar[], buildCtx: (bars: OhlcBar[]) => IndicatorContext): ChartPoint[] {
+  const ctx = buildCtx(bars);
 
   return bars.map((bar, i) => ({
     ts: bar.ts,

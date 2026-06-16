@@ -61,15 +61,19 @@
       </p>
 
       <h3>Perfil de riesgo</h3>
+      <p class="muted">
+        Todas las compras son órdenes límite simples (sin stop-loss ni take-profit adjuntos).
+        La posición se cierra únicamente cuando la condición activa emite señal de venta.
+      </p>
       <div class="form-grid">
         <label class="form-field">
           Preset
           <select id="risk-preset">
-            <option value="conservador">Conservador</option>
-            <option value="moderado">Moderado</option>
-            <option value="agresivo">Agresivo</option>
+            <option value="conservador">Conservador (5% · máx 3)</option>
+            <option value="moderado">Moderado (10% · máx 5)</option>
+            <option value="agresivo">Agresivo (15% · máx 8)</option>
+            <option value="flujo_de_caja">Flujo de caja (7% · máx 18)</option>
             <option value="personalizado">Personalizado</option>
-            <option value="sin_bracket">Sin bracket (solo señal)</option>
           </select>
         </label>
         <label class="form-field">
@@ -77,24 +81,10 @@
           <input type="number" id="risk-position-size" min="0.1" max="100" step="0.1" />
         </label>
         <label class="form-field">
-          Stop-loss (%)
-          <input type="number" id="risk-stop-loss" min="0.1" max="99" step="0.1" />
-        </label>
-        <label class="form-field">
-          Take-profit (%)
-          <input type="number" id="risk-take-profit" min="0.1" max="199" step="0.1" />
-        </label>
-        <label class="form-field">
           Máx. posiciones abiertas
           <input type="number" id="risk-max-positions" min="1" max="20" step="1" />
         </label>
       </div>
-      <p class="muted">
-        "Sin bracket (solo señal)": las compras se hacen sin take-profit ni stop-loss
-        adjuntos; la posición se cierra únicamente cuando la condición activa emite una
-        señal de venta. El tamaño de posición y máx. posiciones siguen aplicando (se toman
-        del último preset numérico usado).
-      </p>
 
       <h3>Modelo de Claude (evaluación de IA)</h3>
       <div class="form-grid">
@@ -139,9 +129,12 @@
             <tr>
               <th data-sort-key="symbol">Símbolo</th>
               <th data-sort-key="type">Tipo</th>
+              <th data-sort-key="system">Sistema</th>
               <th data-sort-key="signal">Señal</th>
-              <th data-sort-key="buyCondition">Cond. compra</th>
-              <th data-sort-key="sellCondition">Cond. venta</th>
+              <th data-sort-key="aiRec" title="Evaluación de Claude: buy / hold / avoid + confianza">IA</th>
+              <th data-sort-key="conditions" title="Condición de compra → condición de venta (nombres abreviados)">Condiciones</th>
+              <th data-sort-key="entryPrice" title="Precio estimado de entrada basado en el indicador activo (nivel de soporte, cruce proyectado, etc.)">P. entrada est.</th>
+              <th data-sort-key="exitPrice" title="Precio estimado de toma de ganancia (take profit). Vacío si el modo de salida es solo por señal (sin TP fijo).">P. salida est.</th>
               <th data-sort-key="reason">Motivo</th>
             </tr>
           </thead>
@@ -156,6 +149,7 @@
           <thead>
             <tr>
               <th data-sort-key="symbol">Símbolo</th>
+              <th data-sort-key="system">Sistema</th>
               <th data-sort-key="buyCondition">Cond. compra</th>
               <th data-sort-key="sellCondition">Cond. venta</th>
               <th data-sort-key="trades">Trades</th>
@@ -199,40 +193,6 @@
 
       <pre id="trade-result" class="result"></pre>
       <pre id="backtesting-result" class="result"></pre>
-    </section>
-
-    <section class="card">
-      <div class="section-header">
-        <h2>Sistema híbrido (Tier 2 paralelo / sombra)</h2>
-      </div>
-      <p class="muted">
-        Fase híbrido: <strong>MS</strong> y <strong>QQQM</strong> corren además un sistema
-        paralelo (combo 1H, presupuesto de riesgo propio) que abre/cierra una porción
-        independiente de la posición de Alpaca de ese símbolo, sin afectar la posición
-        "main" (1D). <strong>SCHD</strong> corre en modo sombra: solo registra qué haría
-        el combo 1H, sin colocar órdenes. SPY y XLU ya usan su combo 1H directamente como
-        señal "main" (ver "Resumen de señales" arriba).
-      </p>
-
-      <h3>Señales híbridas (1H)</h3>
-      <div class="table-wrap">
-        <table id="hybrid-signals-table">
-          <thead>
-            <tr><th>Símbolo</th><th>Sistema</th><th>Señal</th><th>Precio</th><th>Cond. compra</th><th>Cond. venta</th><th>Motivo</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-
-      <h3>Posiciones paralelas (Tier 2)</h3>
-      <div class="table-wrap">
-        <table id="parallel-positions-table">
-          <thead>
-            <tr><th>Símbolo</th><th>Cantidad</th><th>Precio entrada</th><th>Estado</th><th>Abierta</th><th>Cerrada</th><th>Precio salida</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
     </section>
 
     <section class="card">

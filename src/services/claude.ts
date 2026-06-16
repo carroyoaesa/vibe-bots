@@ -42,6 +42,7 @@ export interface SymbolAssessment {
   recommendation: 'buy' | 'hold' | 'avoid';
   confidence: number;
   rationale: string;
+  simplifiedReason: string;
   adjustedEntryPrice: number | null;
   adjustedExitPrice: number | null;
 }
@@ -68,7 +69,11 @@ const RECORD_ASSESSMENTS_TOOL = {
             score: { type: 'number', description: 'Puntaje de -1 (muy negativo) a 1 (muy positivo)' },
             recommendation: { type: 'string', enum: ['buy', 'hold', 'avoid'] },
             confidence: { type: 'number', description: 'Confianza de 0 (baja) a 1 (alta)' },
-            rationale: { type: 'string', description: 'Justificación breve (1-2 oraciones, en español)' },
+            rationale: { type: 'string', description: 'Justificación breve (1-2 oraciones, en español) para el equipo técnico' },
+            simplified_reason: {
+              type: 'string',
+              description: 'Explicación en español en 1 oración simple (máx. 25 palabras), sin jerga técnica, apta para un inversor no analista. Ej.: "Apple salió de zona de sobreventa y podría rebotar en los próximos días." o "Amazon sigue en tendencia bajista, esperando una señal clara de cambio."',
+            },
             adjustedEntryPrice: {
               type: 'number',
               description: 'Precio de entrada ajustado, solo si difiere del "Precio est. entrada (algorítmico)" dado en el contexto. Omitir si ese estimado parece razonable.',
@@ -78,7 +83,7 @@ const RECORD_ASSESSMENTS_TOOL = {
               description: 'Precio de salida/take-profit ajustado, solo si difiere del "Precio est. salida (algorítmico)" dado en el contexto. Omitir si ese estimado parece razonable.',
             },
           },
-          required: ['symbol', 'score', 'recommendation', 'confidence', 'rationale'],
+          required: ['symbol', 'score', 'recommendation', 'confidence', 'rationale', 'simplified_reason'],
         },
       },
     },
@@ -176,6 +181,7 @@ export async function assessWatchlist(
     recommendation: item.recommendation === 'buy' || item.recommendation === 'avoid' ? item.recommendation : 'hold',
     confidence: Number(item.confidence),
     rationale: String(item.rationale ?? ''),
+    simplifiedReason: String(item.simplified_reason ?? item.rationale ?? ''),
     adjustedEntryPrice: item.adjustedEntryPrice !== undefined && item.adjustedEntryPrice !== null ? Number(item.adjustedEntryPrice) : null,
     adjustedExitPrice: item.adjustedExitPrice !== undefined && item.adjustedExitPrice !== null ? Number(item.adjustedExitPrice) : null,
   }));

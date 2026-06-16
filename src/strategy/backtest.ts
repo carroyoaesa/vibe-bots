@@ -1,4 +1,5 @@
-import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, OhlcBar } from './conditions';
+import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, IndicatorContext, OhlcBar } from './conditions';
+import { buildIndicatorContext1H, computeEstimatedEntryPrice1H } from './conditions1h';
 import { ExitMode, RISK_PROFILE, RiskProfile } from './config';
 
 export type BacktestExitReason = 'TP' | 'SL' | 'SELL_SIGNAL' | 'END_OF_DATA';
@@ -54,9 +55,58 @@ export function runCombinedBacktest(
   sellConditionId: string = DEFAULT_CONDITION_ID,
   exitMode: ExitMode = 'bracket'
 ): BacktestResult {
+  return runCombinedBacktestWith(
+    symbol,
+    bars,
+    riskProfile,
+    buyConditionId,
+    sellConditionId,
+    exitMode,
+    buildIndicatorContext,
+    computeEstimatedEntryPrice
+  );
+}
+
+/**
+ * Igual que `runCombinedBacktest`, pero sobre velas de 1 HORA con los períodos de
+ * indicador reescalados por `SCALE_1H=8` (`strategy/conditions1h.ts`). Usado por el
+ * sistema híbrido (`strategy/hybridConfig.ts`) para los símbolos tier 1 (combo 1H
+ * reemplaza el pick 1D) y tier 2/'shadow' (combo 1H informativo, además del pick 1D).
+ */
+export function runCombinedBacktest1H(
+  symbol: string,
+  bars: OhlcBar[],
+  riskProfile: RiskProfile = RISK_PROFILE,
+  buyConditionId: string = DEFAULT_CONDITION_ID,
+  sellConditionId: string = DEFAULT_CONDITION_ID,
+  exitMode: ExitMode = 'bracket'
+): BacktestResult {
+  return runCombinedBacktestWith(
+    symbol,
+    bars,
+    riskProfile,
+    buyConditionId,
+    sellConditionId,
+    exitMode,
+    buildIndicatorContext1H,
+    computeEstimatedEntryPrice1H
+  );
+}
+
+/** Lógica común a `runCombinedBacktest` (velas 1D) y `runCombinedBacktest1H` (velas 1H) - difieren solo en cómo se construye el `IndicatorContext` y el precio estimado de entrada. */
+function runCombinedBacktestWith(
+  symbol: string,
+  bars: OhlcBar[],
+  riskProfile: RiskProfile,
+  buyConditionId: string,
+  sellConditionId: string,
+  exitMode: ExitMode,
+  buildCtx: (bars: OhlcBar[]) => IndicatorContext,
+  computeEntryPrice: (ctx: IndicatorContext, i: number, conditionId: string) => number | null
+): BacktestResult {
   const buyCondition = CONDITIONS.find((c) => c.id === buyConditionId) ?? CONDITIONS[0];
   const sellCondition = CONDITIONS.find((c) => c.id === sellConditionId) ?? CONDITIONS[0];
-  const ctx = buildIndicatorContext(bars);
+  const ctx = buildCtx(bars);
   const trades: BacktestTrade[] = [];
 
   // i=1 (no i=0) para que ctx[i-1] sea siempre un índice válido del array;
@@ -67,7 +117,7 @@ export function runCombinedBacktest(
     const action = buyCondition.evaluate(ctx, i);
 
     if (action === 'BUY' && i + 1 < bars.length) {
-      const estimatedEntryPrice = computeEstimatedEntryPrice(ctx, i, buyCondition.id);
+      const estimatedEntryPrice = computeEntryPrice(ctx, i, buyCondition.id);
       const price = ctx.closes[i];
       const entryPrice = estimatedEntryPrice !== null ? Math.min(estimatedEntryPrice, price) : price;
 

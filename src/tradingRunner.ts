@@ -25,7 +25,6 @@ import {
   getAccount,
   getPositions,
   getOpenOrders,
-  placeBracketBuyOrder,
   placeBuyOrder,
   cancelOrder,
   closePosition,
@@ -37,7 +36,7 @@ import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './ser
 import { computeSignal, computeSignal1H, SignalResult } from './strategy/signals';
 import { DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
-import { setupConditionSchema, getSymbolConditions } from './services/conditionStore';
+import { setupConditionSchema, getMainSymbolConditions } from './services/conditionStore';
 import { setupParallelSchema, getOpenParallelPositions, openParallelPosition, closeParallelPosition } from './services/parallelStore';
 import { HYBRID_CONFIG, HYBRID_SYMBOLS, TIER2_SYMBOLS, SHADOW_SYMBOLS, PARALLEL_RISK_PROFILE } from './strategy/hybridConfig';
 import { WATCHLIST, ETF_SYMBOLS, MACRO_SERIES } from './watchlist';
@@ -114,7 +113,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     await setupConditionSchema(pool);
     await setupParallelSchema(pool);
     const settings = await getSettings(pool);
-    const symbolConditions = await getSymbolConditions(pool);
+    const symbolConditions = await getMainSymbolConditions(pool);
 
     const account = await getAccount(alpacaClient);
     const positions = await getPositions(alpacaClient);
@@ -249,7 +248,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
         if (assessment) {
           // Aplica el ajuste de precios propuesto por Claude (acotado a ±10%) ANTES de
-          // persistir/usar la señal, para que lo guardado/mostrado y la bracket order
+          // persistir/usar la señal, para que lo guardado/mostrado y la orden
           // sean consistentes con el valor verificado.
           const adjEntry = applyPriceAdjustment(signal.estimatedEntryPrice, assessment.adjustedEntryPrice);
           const adjExit = applyPriceAdjustment(signal.estimatedExitPrice, assessment.adjustedExitPrice);
@@ -272,6 +271,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
             recommendation: assessment.recommendation,
             confidence: assessment.confidence,
             rationale: assessment.rationale,
+            simplifiedReason: assessment.simplifiedReason ?? null,
             model: assessmentModel,
             adjustedEntryPrice: assessment.adjustedEntryPrice,
             adjustedExitPrice: assessment.adjustedExitPrice,
@@ -296,15 +296,23 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
             actions.push({ type: 'AI_BLOCKED', symbol, reason: assessment.rationale });
           } else {
             const positionValue = account.equity * settings.riskProfile.positionSizePct;
-            const qty = Math.floor(positionValue / signal.price);
+            // Ajusta qty si excede el buying power disponible (ocurre con flujo_de_caja
+            // cuando hay >13 posiciones abiertas y se empieza a usar margen).
+            let qty = Math.floor(positionValue / signal.price);
+            if (qty > 0 && qty * signal.price > account.buyingPower) {
+              qty = Math.floor(account.buyingPower / signal.price);
+            }
 
             if (qty < 1) {
               actions.push({
                 type: 'SKIPPED',
                 symbol,
-                reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${signal.price.toFixed(2)})`,
+                reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${signal.price.toFixed(2)}, buyingPower=$${account.buyingPower.toFixed(0)})`,
               });
             } else {
+              if (account.cash < qty * signal.price) {
+                console.log(`[${symbol}] Usando margen: cash=$${account.cash.toFixed(0)}, orden=$${(qty * signal.price).toFixed(0)}, buyingPower=$${account.buyingPower.toFixed(0)}`);
+              }
               // Orden límite al precio estimado de entrada (no a mercado), con TP/SL relativos a ese precio.
               // Si el precio actual ya está por debajo del estimado, conviene tomar el menor de los dos
               // (mejor precio de entrada para el comprador) en lugar de esperar a que suba al estimado.
@@ -312,56 +320,27 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
                 ? Math.min(signal.estimatedEntryPrice, signal.price)
                 : signal.price;
 
-              if (settings.exitMode === 'signal_only') {
-                // Sin bracket: orden límite simple, sin TP/SL. La posición se cierra
-                // únicamente cuando la condición activa emite señal SELL (closePosition más abajo).
-                const order = await placeBuyOrder(alpacaClient, {
-                  symbol,
-                  qty,
-                  limitPrice: entryPrice,
-                });
+              // Orden límite simple, sin TP/SL. La posición se cierra únicamente cuando
+              // la condición activa emite señal SELL (closePosition más abajo).
+              const order = await placeBuyOrder(alpacaClient, {
+                symbol,
+                qty,
+                limitPrice: entryPrice,
+              });
 
-                await saveOrder(pool, {
-                  signalId,
-                  symbol,
-                  side: 'buy',
-                  qty,
-                  orderType: 'simple',
-                  alpacaOrderId: order.id,
-                  status: order.status,
-                  raw: order,
-                });
+              await saveOrder(pool, {
+                signalId,
+                symbol,
+                side: 'buy',
+                qty,
+                orderType: 'simple',
+                alpacaOrderId: order.id,
+                status: order.status,
+                raw: order,
+              });
 
-                actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id });
-                openPositionsCount += 1;
-              } else {
-                const takeProfitPrice = entryPrice * (1 + settings.riskProfile.takeProfitPct);
-                const stopLossPrice = entryPrice * (1 - settings.riskProfile.stopLossPct);
-
-                const order = await placeBracketBuyOrder(alpacaClient, {
-                  symbol,
-                  qty,
-                  limitPrice: entryPrice,
-                  takeProfitPrice,
-                  stopLossPrice,
-                });
-
-                await saveOrder(pool, {
-                  signalId,
-                  symbol,
-                  side: 'buy',
-                  qty,
-                  orderType: 'bracket',
-                  alpacaOrderId: order.id,
-                  takeProfitPrice,
-                  stopLossPrice,
-                  status: order.status,
-                  raw: order,
-                });
-
-                actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice, stopLossPrice, alpacaOrderId: order.id });
-                openPositionsCount += 1;
-              }
+              actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id });
+              openPositionsCount += 1;
             }
           }
         } else if (signal.signal === 'SELL') {

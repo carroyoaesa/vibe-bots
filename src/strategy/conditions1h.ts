@@ -15,7 +15,6 @@ import {
   bollingerBands,
   cciSeries,
   emaSeries,
-  estimateEntryPrice,
   macdSeries,
   priorHighSeries,
   priorLowSeries,
@@ -25,7 +24,7 @@ import {
   stochasticSeries,
   williamsRSeries,
 } from './indicators';
-import { IndicatorContext, OhlcBar } from './conditions';
+import { IndicatorContext, OhlcBar, computeEstimatedEntryPrice } from './conditions';
 
 /** Factor de reescalado de períodos para velas 1H (10 -> 80, 14 -> 112, 20 -> 160, etc.). Fijado en Fase 1 (`phase1_full20`). */
 export const SCALE_1H = 8;
@@ -64,15 +63,9 @@ export function buildIndicatorContext1H(bars: OhlcBar[]): IndicatorContext {
   };
 }
 
-/** Igual que `computeEstimatedEntryPrice` (`./conditions.ts`) pero con los períodos de cruce reescalados por `SCALE_1H`. */
+/** Igual que `computeEstimatedEntryPrice` (`./conditions.ts`) pero con todos los períodos reescalados por `SCALE_1H`. */
 export function computeEstimatedEntryPrice1H(ctx: IndicatorContext, i: number, conditionId: string): number | null {
-  if (conditionId === 'sma_cross_10_30') {
-    return estimateEntryPrice(ctx.closes.slice(0, i + 1), 10 * SCALE_1H, ctx.sma30[i]);
-  }
-  if (conditionId === 'sma_cross_20_50') {
-    return estimateEntryPrice(ctx.closes.slice(0, i + 1), 20 * SCALE_1H, ctx.sma50[i]);
-  }
-  return ctx.closes[i];
+  return computeEstimatedEntryPrice(ctx, i, conditionId, SCALE_1H);
 }
 
 /** Mínimo de velas 1H para que SMA50 (reescalada a `50*SCALE_1H`) esté disponible en `i` e `i-1`. */

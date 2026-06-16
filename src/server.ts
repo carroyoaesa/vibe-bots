@@ -20,7 +20,7 @@ import {
 import { setupTradingSchema, getRecentOrders, getLatestAssessments, getLatestSignals, getLatestHybridSignals } from './services/tradingStore';
 import { getRecentOhlcBars, getRecentOhlcBars1H } from './services/marketStore';
 import { createMarketDataClient, getAdjustedCloses } from './services/marketData';
-import { buildChartSeries } from './strategy/chart';
+import { buildChartSeries, buildChartSeries1H } from './strategy/chart';
 import { computeSignal, computeSignal1H } from './strategy/signals';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { RISK_PROFILE_PRESETS } from './strategy/config';
@@ -29,7 +29,7 @@ import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
 import { runBacktestForWatchlist } from './backtestRunner';
 import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
-import { setupConditionSchema, getSymbolConditions } from './services/conditionStore';
+import { setupConditionSchema, getSymbolConditions, getMainSymbolConditions } from './services/conditionStore';
 import { setupParallelSchema, getRecentParallelPositions } from './services/parallelStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
 
@@ -42,6 +42,7 @@ const HOURLY_BARS_FOR_SIGNAL = 450;
 // (los indicadores de mayor período entre las 12 condiciones) tengan ~100 puntos
 // válidos dentro de la ventana visible (Fase 6.1).
 const CHART_LOOKBACK_BARS = 150;
+const CHART_LOOKBACK_BARS_1H = 600;
 // Velas (OHLC diarias) pedidas por símbolo para recalcular la señal de cada condición activa (Fase 6).
 const BARS_LOOKBACK = 100;
 const SNAPSHOT_KEY_PATTERN = /^(ingest|trading)\/[A-Za-z0-9_\-:.]+\.json$/;
@@ -80,7 +81,7 @@ app.get('/api/trading/status', async (_req, res) => {
     await setupConditionSchema(pool);
     await setupParallelSchema(pool);
     const settings = await getSettings(pool);
-    const symbolConditions = await getSymbolConditions(pool);
+    const symbolConditions = await getMainSymbolConditions(pool);
 
     const [account, positions, orders, latestSignals, latestHybridSignals, parallelPositions, openOrdersCache] = await Promise.all([
       // Cuenta y posiciones se cachean en Redis (TTLs cortos) y se comparten con el check
@@ -122,10 +123,12 @@ app.get('/api/trading/status', async (_req, res) => {
 
         return {
           ...signal,
-          // Refleja el último precio verificado/ajustado por la fase de IA (si lo hay),
-          // sin llamar a Claude en cada poll del dashboard.
-          estimatedEntryPrice: latest?.estimatedEntryPrice ?? signal.estimatedEntryPrice,
-          estimatedExitPrice: latest?.estimatedExitPrice ?? signal.estimatedExitPrice,
+          // El precio algorítmico fresco (recién computado) es la fuente primaria — refleja
+          // siempre el estado actual del indicador. El valor de DB (potencialmente ajustado
+          // por IA en el último ciclo) solo se usa como fallback cuando el cálculo fresco
+          // devuelve null (historial insuficiente).
+          estimatedEntryPrice: signal.estimatedEntryPrice ?? latest?.estimatedEntryPrice,
+          estimatedExitPrice: signal.estimatedExitPrice ?? latest?.estimatedExitPrice,
           type: ETF_SYMBOLS.includes(symbol) ? ('ETF' as const) : ('STOCK' as const),
         };
       })
@@ -143,8 +146,8 @@ app.get('/api/trading/status', async (_req, res) => {
 
         return {
           ...signal,
-          estimatedEntryPrice: latest?.estimatedEntryPrice ?? signal.estimatedEntryPrice,
-          estimatedExitPrice: latest?.estimatedExitPrice ?? signal.estimatedExitPrice,
+          estimatedEntryPrice: signal.estimatedEntryPrice ?? latest?.estimatedEntryPrice,
+          estimatedExitPrice: signal.estimatedExitPrice ?? latest?.estimatedExitPrice,
           system: hybrid.tier === 'shadow' ? ('shadow' as const) : ('parallel' as const),
         };
       })
@@ -170,13 +173,19 @@ app.get('/api/trading/chart/:symbol', async (req, res) => {
     return;
   }
 
+  const use1H = req.query.tf === '1H';
   const pool = createPostgresPool(loadPostgresConfig());
 
   try {
-    const bars = await getRecentOhlcBars(pool, symbol, CHART_LOOKBACK_BARS);
-    const points = buildChartSeries(bars);
-
-    res.json({ ok: true, symbol, points });
+    if (use1H) {
+      const bars = await getRecentOhlcBars1H(pool, symbol, CHART_LOOKBACK_BARS_1H);
+      const points = buildChartSeries1H(bars);
+      res.json({ ok: true, symbol, timeframe: '1Hour', points });
+    } else {
+      const bars = await getRecentOhlcBars(pool, symbol, CHART_LOOKBACK_BARS);
+      const points = buildChartSeries(bars);
+      res.json({ ok: true, symbol, timeframe: '1Day', points });
+    }
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {
@@ -197,9 +206,8 @@ app.post('/api/trading/run', async (_req, res) => {
   }
 });
 
-const VALID_RISK_PRESETS = ['conservador', 'moderado', 'agresivo', 'personalizado'];
+const VALID_RISK_PRESETS = ['conservador', 'moderado', 'agresivo', 'flujo_de_caja', 'personalizado'];
 const VALID_CLAUDE_MODELS = CLAUDE_MODEL_OPTIONS.map((model) => model.id);
-const VALID_EXIT_MODES = ['bracket', 'signal_only'];
 
 app.get('/api/settings', async (_req, res) => {
   const pool = createPostgresPool(loadPostgresConfig());
@@ -220,7 +228,6 @@ app.post('/api/settings', async (req, res) => {
   const body = req.body ?? {};
   const { riskPreset, riskProfile } = body;
   const claudeModel = body.claudeModel ?? null;
-  const exitMode = body.exitMode ?? 'bracket';
 
   if (!VALID_RISK_PRESETS.includes(riskPreset)) {
     res.status(400).json({ ok: false, error: `riskPreset inválido: debe ser uno de ${VALID_RISK_PRESETS.join(', ')}.` });
@@ -230,25 +237,18 @@ app.post('/api/settings', async (req, res) => {
   if (
     typeof riskProfile !== 'object' || riskProfile === null ||
     typeof riskProfile.positionSizePct !== 'number' || riskProfile.positionSizePct <= 0 || riskProfile.positionSizePct > 1 ||
-    typeof riskProfile.stopLossPct !== 'number' || riskProfile.stopLossPct <= 0 || riskProfile.stopLossPct >= 1 ||
-    typeof riskProfile.takeProfitPct !== 'number' || riskProfile.takeProfitPct <= 0 || riskProfile.takeProfitPct >= 2 ||
     typeof riskProfile.maxPositions !== 'number' || !Number.isInteger(riskProfile.maxPositions) ||
     riskProfile.maxPositions < 1 || riskProfile.maxPositions > 20
   ) {
     res.status(400).json({
       ok: false,
-      error: 'riskProfile inválido: positionSizePct debe estar en (0,1], stopLossPct en (0,1), takeProfitPct en (0,2) y maxPositions debe ser un entero entre 1 y 20.',
+      error: 'riskProfile inválido: positionSizePct debe estar en (0,1] y maxPositions debe ser un entero entre 1 y 20.',
     });
     return;
   }
 
   if (claudeModel !== null && !VALID_CLAUDE_MODELS.includes(claudeModel)) {
     res.status(400).json({ ok: false, error: `claudeModel inválido: debe ser uno de ${VALID_CLAUDE_MODELS.join(', ')} o null.` });
-    return;
-  }
-
-  if (!VALID_EXIT_MODES.includes(exitMode)) {
-    res.status(400).json({ ok: false, error: `exitMode inválido: debe ser uno de ${VALID_EXIT_MODES.join(', ')}.` });
     return;
   }
 
@@ -260,12 +260,12 @@ app.post('/api/settings', async (req, res) => {
       riskPreset,
       riskProfile: {
         positionSizePct: riskProfile.positionSizePct,
-        stopLossPct: riskProfile.stopLossPct,
-        takeProfitPct: riskProfile.takeProfitPct,
+        stopLossPct: 0.03,   // no se usa (siempre signal_only), mantenido en DB por compatibilidad
+        takeProfitPct: 0.06, // no se usa (siempre signal_only), mantenido en DB por compatibilidad
         maxPositions: riskProfile.maxPositions,
       },
       claudeModel,
-      exitMode,
+      exitMode: 'signal_only', // siempre: nunca se usan bracket orders
     });
 
     res.json({ ok: true, savedAt: new Date().toISOString() });
@@ -379,26 +379,65 @@ app.get('/api/conditions', async (_req, res) => {
       }
     }
 
-    const conditions = WATCHLIST.map((symbol) => {
-      const row = symbolConditions.get(symbol);
-      const buyCondition = CONDITIONS.find((c) => c.id === (row?.buyConditionId ?? DEFAULT_CONDITION_ID)) ?? CONDITIONS[0];
-      const sellCondition = CONDITIONS.find((c) => c.id === (row?.sellConditionId ?? DEFAULT_CONDITION_ID)) ?? CONDITIONS[0];
+    // Aplanar: 1 entrada por fila (hasta 2 para híbridos - '1Day' + '1Hour'), cada una
+    // con `timeframe` y `system` derivados de `HYBRID_CONFIG[symbol]` + `timeframe`.
+    const conditions: object[] = [];
+    for (const symbol of WATCHLIST) {
+      const rows = symbolConditions.get(symbol);
+      const hybrid = HYBRID_CONFIG[symbol];
+      const buyHoldReturnPct = buyHoldReturns.get(symbol) ?? null;
 
-      return {
-        symbol,
-        buyConditionId: row?.buyConditionId ?? buyCondition.id,
-        buyConditionLabel: row?.buyConditionLabel ?? buyCondition.label,
-        sellConditionId: row?.sellConditionId ?? sellCondition.id,
-        sellConditionLabel: row?.sellConditionLabel ?? sellCondition.label,
-        trades: row?.trades ?? 0,
-        winRatePct: row?.winRatePct ?? null,
-        totalReturnPct: row?.totalReturnPct ?? 0,
-        avgReturnPct: row?.avgReturnPct ?? null,
-        maxDrawdownPct: row?.maxDrawdownPct ?? 0,
-        updatedAt: row?.updatedAt ?? null,
-        buyHoldReturnPct: buyHoldReturns.get(symbol) ?? null,
-      };
-    });
+      if (!rows || rows.length === 0) {
+        const buyCondition = CONDITIONS.find((c) => c.id === DEFAULT_CONDITION_ID) ?? CONDITIONS[0];
+        conditions.push({
+          symbol,
+          timeframe: '1Day',
+          system: 'main',
+          buyConditionId: buyCondition.id,
+          buyConditionLabel: buyCondition.label,
+          sellConditionId: buyCondition.id,
+          sellConditionLabel: buyCondition.label,
+          trades: 0,
+          winRatePct: null,
+          totalReturnPct: 0,
+          avgReturnPct: null,
+          maxDrawdownPct: 0,
+          updatedAt: null,
+          buyHoldReturnPct,
+        });
+        continue;
+      }
+
+      for (const row of rows) {
+        let system: 'main' | 'parallel' | 'shadow';
+        if (!hybrid || row.timeframe === '1Day') {
+          system = 'main';
+        } else if (hybrid.tier === 1) {
+          system = 'main';
+        } else if (hybrid.tier === 2) {
+          system = 'parallel';
+        } else {
+          system = 'shadow';
+        }
+
+        conditions.push({
+          symbol,
+          timeframe: row.timeframe,
+          system,
+          buyConditionId: row.buyConditionId,
+          buyConditionLabel: row.buyConditionLabel,
+          sellConditionId: row.sellConditionId,
+          sellConditionLabel: row.sellConditionLabel,
+          trades: row.trades,
+          winRatePct: row.winRatePct,
+          totalReturnPct: row.totalReturnPct,
+          avgReturnPct: row.avgReturnPct,
+          maxDrawdownPct: row.maxDrawdownPct,
+          updatedAt: row.updatedAt,
+          buyHoldReturnPct,
+        });
+      }
+    }
 
     res.json({
       ok: true,

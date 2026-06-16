@@ -31,7 +31,10 @@ export const RISK_PROFILE: RiskProfile = {
 
 // Presets de perfil de riesgo (Fase 5) - punto de partida editable desde el dashboard
 // ("Configuración"). El perfil activo en runtime vive en bot_settings, no aquí.
-export const RISK_PROFILE_PRESETS: Record<'conservador' | 'moderado' | 'agresivo', RiskProfile> = {
+// "flujo_de_caja": 7%×18 = 126% equity máximo (26% margin), basado en el análisis de
+// concurrencia del backtest (media 12.6 posiciones, máx 18) - diseñado para desplegar
+// siempre el 100% del cash y aprovechar el buying power en los picos de señales.
+export const RISK_PROFILE_PRESETS: Record<'conservador' | 'moderado' | 'agresivo' | 'flujo_de_caja', RiskProfile> = {
   conservador: {
     positionSizePct: 0.05,
     stopLossPct: 0.02,
@@ -44,5 +47,11 @@ export const RISK_PROFILE_PRESETS: Record<'conservador' | 'moderado' | 'agresivo
     stopLossPct: 0.05,
     takeProfitPct: 0.10,
     maxPositions: 8,
+  },
+  flujo_de_caja: {
+    positionSizePct: 0.07,
+    stopLossPct: 0.03,
+    takeProfitPct: 0.06,
+    maxPositions: 18,
   },
 };

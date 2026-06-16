@@ -1,12 +1,13 @@
 import { Pool } from 'pg';
 import { WATCHLIST } from './watchlist';
-import { getAllBars } from './services/marketStore';
-import { runCombinedBacktest, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
+import { getAllBars, getAllBars1H } from './services/marketStore';
+import { runCombinedBacktest, runCombinedBacktest1H, BacktestResult, BacktestTrade, SymbolBacktestSummary } from './strategy/backtest';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { saveBacktestRun } from './services/backtestStore';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
-import { setupConditionSchema, saveSymbolConditions, SymbolConditionPick } from './services/conditionStore';
+import { setupConditionSchema, saveSymbolConditions, deleteSymbolConditionsForTimeframe, SymbolConditionPick } from './services/conditionStore';
 import { STRATEGY_PARAMS } from './strategy/config';
+import { HYBRID_CONFIG, TIER1_SYMBOLS } from './strategy/hybridConfig';
 
 export interface PortfolioBacktestSummary {
   symbols: number;
@@ -41,74 +42,150 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
 
   for (const symbol of WATCHLIST) {
     const bars = await getAllBars(pool, symbol);
+    const hybrid = HYBRID_CONFIG[symbol];
 
-    if (bars.length === 0) {
-      symbolSummaries.push({
-        symbol,
-        trades: 0,
-        wins: 0,
-        losses: 0,
-        winRate: null,
-        totalReturnPct: 0,
-        avgReturnPct: null,
-        maxDrawdownPct: 0,
-      });
+    if (bars.length > 0) {
+      const firstDate = bars[0].ts.slice(0, 10);
+      const lastDate = bars[bars.length - 1].ts.slice(0, 10);
+      if (startDate === null || firstDate < startDate) startDate = firstDate;
+      if (endDate === null || lastDate > endDate) endDate = lastDate;
+    }
+
+    if (hybrid?.tier === 1) {
+      // Tier 1 (SPY, XLU): skip 144-combo — use HYBRID_CONFIG 1H combo as the sole pick.
+      // This result feeds symbolSummaries/trades/portfolio (replaces the 1D pick entirely).
+      const bars1h = await getAllBars1H(pool, symbol);
+
+      if (bars1h.length === 0) {
+        symbolSummaries.push({ symbol, trades: 0, wins: 0, losses: 0, winRate: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
+        const buyCondition = CONDITIONS.find((c) => c.id === hybrid.buyConditionId) ?? CONDITIONS[0];
+        const sellCondition = CONDITIONS.find((c) => c.id === hybrid.sellConditionId) ?? CONDITIONS[0];
+        picks.push({ symbol, timeframe: '1Hour', buyConditionId: hybrid.buyConditionId, buyConditionLabel: buyCondition.label, sellConditionId: hybrid.sellConditionId, sellConditionLabel: sellCondition.label, trades: 0, winRatePct: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
+        continue;
+      }
+
+      const result = runCombinedBacktest1H(symbol, bars1h, settings.riskProfile, hybrid.buyConditionId, hybrid.sellConditionId, settings.exitMode);
+      symbolSummaries.push(result.summary);
+      trades.push(...result.trades);
+
+      const buyCondition = CONDITIONS.find((c) => c.id === hybrid.buyConditionId) ?? CONDITIONS[0];
+      const sellCondition = CONDITIONS.find((c) => c.id === hybrid.sellConditionId) ?? CONDITIONS[0];
       picks.push({
         symbol,
-        buyConditionId: defaultCondition.id,
-        buyConditionLabel: defaultCondition.label,
-        sellConditionId: defaultCondition.id,
-        sellConditionLabel: defaultCondition.label,
-        trades: 0,
-        winRatePct: null,
-        totalReturnPct: 0,
-        avgReturnPct: null,
-        maxDrawdownPct: 0,
+        timeframe: '1Hour',
+        buyConditionId: hybrid.buyConditionId,
+        buyConditionLabel: buyCondition.label,
+        sellConditionId: hybrid.sellConditionId,
+        sellConditionLabel: sellCondition.label,
+        trades: result.summary.trades,
+        winRatePct: result.summary.winRate,
+        totalReturnPct: result.summary.totalReturnPct,
+        avgReturnPct: result.summary.avgReturnPct,
+        maxDrawdownPct: result.summary.maxDrawdownPct,
       });
-      continue;
-    }
 
-    const firstDate = bars[0].ts.slice(0, 10);
-    const lastDate = bars[bars.length - 1].ts.slice(0, 10);
-    if (startDate === null || firstDate < startDate) startDate = firstDate;
-    if (endDate === null || lastDate > endDate) endDate = lastDate;
+    } else if (hybrid) {
+      // Tier 2 (MS, QQQM) / shadow (SCHD): run 144-combo 1D unchanged (pick goes to portfolio)
+      // plus run HYBRID_CONFIG 1H combo for informational '1Hour' pick (NOT in portfolio).
+      if (bars.length === 0) {
+        symbolSummaries.push({ symbol, trades: 0, wins: 0, losses: 0, winRate: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
+        picks.push({ symbol, timeframe: '1Day', buyConditionId: defaultCondition.id, buyConditionLabel: defaultCondition.label, sellConditionId: defaultCondition.id, sellConditionLabel: defaultCondition.label, trades: 0, winRatePct: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
+      } else {
+        let best: BacktestResult = runCombinedBacktest(symbol, bars, settings.riskProfile, defaultCondition.id, defaultCondition.id, settings.exitMode);
+        let bestBuyCondition = defaultCondition;
+        let bestSellCondition = defaultCondition;
 
-    // Fase 7 (`bots/backtests/src/runComboMatrix.ts`): corre las 12x12=144 combinaciones de
-    // (condición de compra, condición de venta) con el motor real de vibe-bots (orden límite,
-    // fill solo si el low de la sesión siguiente toca el precio límite) y elige la de mayor
-    // retorno total entre las que operaron al menos una vez. Si ninguna operó, queda
-    // DEFAULT_CONDITION_ID para ambas (trades: 0) = comportamiento histórico.
-    let best: BacktestResult = runCombinedBacktest(symbol, bars, settings.riskProfile, defaultCondition.id, defaultCondition.id, settings.exitMode);
-    let bestBuyCondition = defaultCondition;
-    let bestSellCondition = defaultCondition;
+        for (const buyCondition of CONDITIONS) {
+          for (const sellCondition of CONDITIONS) {
+            if (buyCondition.id === defaultCondition.id && sellCondition.id === defaultCondition.id) continue;
+            const result = runCombinedBacktest(symbol, bars, settings.riskProfile, buyCondition.id, sellCondition.id, settings.exitMode);
+            if (result.summary.trades > 0 && (best.summary.trades === 0 || result.summary.totalReturnPct > best.summary.totalReturnPct)) {
+              best = result;
+              bestBuyCondition = buyCondition;
+              bestSellCondition = sellCondition;
+            }
+          }
+        }
 
-    for (const buyCondition of CONDITIONS) {
-      for (const sellCondition of CONDITIONS) {
-        if (buyCondition.id === defaultCondition.id && sellCondition.id === defaultCondition.id) continue;
+        symbolSummaries.push(best.summary);
+        trades.push(...best.trades);
+        picks.push({
+          symbol,
+          timeframe: '1Day',
+          buyConditionId: bestBuyCondition.id,
+          buyConditionLabel: bestBuyCondition.label,
+          sellConditionId: bestSellCondition.id,
+          sellConditionLabel: bestSellCondition.label,
+          trades: best.summary.trades,
+          winRatePct: best.summary.winRate,
+          totalReturnPct: best.summary.totalReturnPct,
+          avgReturnPct: best.summary.avgReturnPct,
+          maxDrawdownPct: best.summary.maxDrawdownPct,
+        });
+      }
 
-        const result = runCombinedBacktest(symbol, bars, settings.riskProfile, buyCondition.id, sellCondition.id, settings.exitMode);
-        if (result.summary.trades > 0 && (best.summary.trades === 0 || result.summary.totalReturnPct > best.summary.totalReturnPct)) {
-          best = result;
-          bestBuyCondition = buyCondition;
-          bestSellCondition = sellCondition;
+      // 1H informational pick — not in portfolio/symbolSummaries
+      const bars1h = await getAllBars1H(pool, symbol);
+      if (bars1h.length > 0) {
+        const result1h = runCombinedBacktest1H(symbol, bars1h, settings.riskProfile, hybrid.buyConditionId, hybrid.sellConditionId, settings.exitMode);
+        const buyCondition = CONDITIONS.find((c) => c.id === hybrid.buyConditionId) ?? CONDITIONS[0];
+        const sellCondition = CONDITIONS.find((c) => c.id === hybrid.sellConditionId) ?? CONDITIONS[0];
+        picks.push({
+          symbol,
+          timeframe: '1Hour',
+          buyConditionId: hybrid.buyConditionId,
+          buyConditionLabel: buyCondition.label,
+          sellConditionId: hybrid.sellConditionId,
+          sellConditionLabel: sellCondition.label,
+          trades: result1h.summary.trades,
+          winRatePct: result1h.summary.winRate,
+          totalReturnPct: result1h.summary.totalReturnPct,
+          avgReturnPct: result1h.summary.avgReturnPct,
+          maxDrawdownPct: result1h.summary.maxDrawdownPct,
+        });
+      }
+
+    } else {
+      // Non-hybrid (13 symbols): existing 144-combo 1D logic, unchanged.
+      if (bars.length === 0) {
+        symbolSummaries.push({ symbol, trades: 0, wins: 0, losses: 0, winRate: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
+        picks.push({ symbol, timeframe: '1Day', buyConditionId: defaultCondition.id, buyConditionLabel: defaultCondition.label, sellConditionId: defaultCondition.id, sellConditionLabel: defaultCondition.label, trades: 0, winRatePct: null, totalReturnPct: 0, avgReturnPct: null, maxDrawdownPct: 0 });
+        continue;
+      }
+
+      let best: BacktestResult = runCombinedBacktest(symbol, bars, settings.riskProfile, defaultCondition.id, defaultCondition.id, settings.exitMode);
+      let bestBuyCondition = defaultCondition;
+      let bestSellCondition = defaultCondition;
+
+      for (const buyCondition of CONDITIONS) {
+        for (const sellCondition of CONDITIONS) {
+          if (buyCondition.id === defaultCondition.id && sellCondition.id === defaultCondition.id) continue;
+
+          const result = runCombinedBacktest(symbol, bars, settings.riskProfile, buyCondition.id, sellCondition.id, settings.exitMode);
+          if (result.summary.trades > 0 && (best.summary.trades === 0 || result.summary.totalReturnPct > best.summary.totalReturnPct)) {
+            best = result;
+            bestBuyCondition = buyCondition;
+            bestSellCondition = sellCondition;
+          }
         }
       }
-    }
 
-    symbolSummaries.push(best.summary);
-    trades.push(...best.trades);
-    picks.push({
-      symbol,
-      buyConditionId: bestBuyCondition.id,
-      buyConditionLabel: bestBuyCondition.label,
-      sellConditionId: bestSellCondition.id,
-      sellConditionLabel: bestSellCondition.label,
-      trades: best.summary.trades,
-      winRatePct: best.summary.winRate,
-      totalReturnPct: best.summary.totalReturnPct,
-      avgReturnPct: best.summary.avgReturnPct,
-      maxDrawdownPct: best.summary.maxDrawdownPct,
-    });
+      symbolSummaries.push(best.summary);
+      trades.push(...best.trades);
+      picks.push({
+        symbol,
+        timeframe: '1Day',
+        buyConditionId: bestBuyCondition.id,
+        buyConditionLabel: bestBuyCondition.label,
+        sellConditionId: bestSellCondition.id,
+        sellConditionLabel: bestSellCondition.label,
+        trades: best.summary.trades,
+        winRatePct: best.summary.winRate,
+        totalReturnPct: best.summary.totalReturnPct,
+        avgReturnPct: best.summary.avgReturnPct,
+        maxDrawdownPct: best.summary.maxDrawdownPct,
+      });
+    }
   }
 
   const withTrades = symbolSummaries.filter((s) => s.trades > 0);
@@ -150,7 +227,7 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
       strategy: STRATEGY_PARAMS,
       risk: settings.riskProfile,
       exitMode: settings.exitMode,
-      conditions: picks.map((p) => ({ symbol: p.symbol, buyConditionId: p.buyConditionId, sellConditionId: p.sellConditionId })),
+      conditions: picks.map((p) => ({ symbol: p.symbol, timeframe: p.timeframe, buyConditionId: p.buyConditionId, sellConditionId: p.sellConditionId })),
     },
     summary: { symbols: symbolSummaries, portfolio },
     trades: trades.map((trade) => ({
@@ -165,6 +242,7 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
   });
 
   await saveSymbolConditions(pool, picks);
+  await deleteSymbolConditionsForTimeframe(pool, TIER1_SYMBOLS, '1Day');
 
   return { runId, startDate, endDate, symbolSummaries, portfolio, trades };
 }

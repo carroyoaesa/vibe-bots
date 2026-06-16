@@ -71,6 +71,7 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
 
   await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_entry_price NUMERIC`);
   await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_exit_price NUMERIC`);
+  await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS simplified_reason TEXT`);
 }
 
 /**
@@ -275,6 +276,7 @@ export interface AiAssessmentRecord {
   recommendation: 'buy' | 'hold' | 'avoid';
   confidence: number | null;
   rationale: string;
+  simplifiedReason: string | null;
   model: string;
   adjustedEntryPrice: number | null;
   adjustedExitPrice: number | null;
@@ -282,14 +284,15 @@ export interface AiAssessmentRecord {
 
 export async function saveAssessment(pool: Pool, assessment: AiAssessmentRecord): Promise<void> {
   await pool.query(
-    `INSERT INTO ai_assessments (symbol, score, recommendation, confidence, rationale, model, adjusted_entry_price, adjusted_exit_price)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    `INSERT INTO ai_assessments (symbol, score, recommendation, confidence, rationale, simplified_reason, model, adjusted_entry_price, adjusted_exit_price)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
       assessment.symbol,
       assessment.score,
       assessment.recommendation,
       assessment.confidence,
       assessment.rationale,
+      assessment.simplifiedReason,
       assessment.model,
       assessment.adjustedEntryPrice,
       assessment.adjustedExitPrice,
@@ -304,6 +307,7 @@ export interface LatestAssessmentRow {
   recommendation: string;
   confidence: number | null;
   rationale: string | null;
+  simplifiedReason: string | null;
   model: string;
   adjustedEntryPrice: number | null;
   adjustedExitPrice: number | null;
@@ -311,7 +315,7 @@ export interface LatestAssessmentRow {
 
 export async function getLatestAssessments(pool: Pool): Promise<LatestAssessmentRow[]> {
   const result = await pool.query(`
-    SELECT DISTINCT ON (symbol) symbol, ts, score, recommendation, confidence, rationale, model, adjusted_entry_price, adjusted_exit_price
+    SELECT DISTINCT ON (symbol) symbol, ts, score, recommendation, confidence, rationale, simplified_reason, model, adjusted_entry_price, adjusted_exit_price
     FROM ai_assessments
     ORDER BY symbol, ts DESC
   `);
@@ -323,6 +327,7 @@ export async function getLatestAssessments(pool: Pool): Promise<LatestAssessment
     recommendation: row.recommendation,
     confidence: row.confidence !== null ? Number(row.confidence) : null,
     rationale: row.rationale,
+    simplifiedReason: row.simplified_reason ?? null,
     model: row.model,
     adjustedEntryPrice: row.adjusted_entry_price !== null ? Number(row.adjusted_entry_price) : null,
     adjustedExitPrice: row.adjusted_exit_price !== null ? Number(row.adjusted_exit_price) : null,

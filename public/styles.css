@@ -237,6 +237,46 @@ td.muted {
   white-space: normal;
 }
 
+td.price-cell {
+  white-space: nowrap;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #9aa0a6;
+}
+
+td.reason-cell {
+  white-space: normal;
+  max-width: 300px;
+  min-width: 140px;
+  font-size: 0.87rem;
+  line-height: 1.4;
+}
+
+td.ai-rec-cell {
+  white-space: nowrap;
+}
+
+td.cond-cell {
+  white-space: nowrap;
+}
+
+.cond-badge {
+  display: inline-block;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  background: #2a2e35;
+  color: #c7c9cc;
+  cursor: default;
+}
+
+.cond-arrow {
+  display: inline-block;
+  margin: 0 0.2rem;
+  color: #5a6072;
+  font-size: 0.8rem;
+}
+
 .signal-buy, .signal-sell, .signal-hold {
   display: inline-block;
   padding: 0.1rem 0.5rem;

@@ -214,11 +214,20 @@ export interface OhlcBar {
 
 /** Historial completo de velas diarias (OHLC) de un símbolo, en orden ascendente por fecha. */
 export async function getAllBars(pool: Pool, symbol: string): Promise<OhlcBar[]> {
+  return getAllBarsByTimeframe(pool, symbol, '1Day');
+}
+
+/** Igual que `getAllBars` pero `timeframe='1Hour'` (Fase híbrido, `strategy/hybridConfig.ts`) - usado por `backtestRunner.ts` para correr `runCombinedBacktest1H` sobre el historial 1H completo. */
+export async function getAllBars1H(pool: Pool, symbol: string): Promise<OhlcBar[]> {
+  return getAllBarsByTimeframe(pool, symbol, '1Hour');
+}
+
+async function getAllBarsByTimeframe(pool: Pool, symbol: string, timeframe: '1Day' | '1Hour'): Promise<OhlcBar[]> {
   const result = await pool.query(
     `SELECT ts, open, high, low, close FROM market_bars
-     WHERE symbol = $1 AND timeframe = '1Day'
+     WHERE symbol = $1 AND timeframe = $2
      ORDER BY ts ASC`,
-    [symbol]
+    [symbol, timeframe]
   );
 
   return result.rows.map((row) => ({
