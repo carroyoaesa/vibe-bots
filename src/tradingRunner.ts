@@ -31,6 +31,7 @@ import {
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './services/tradingStore';
 import { computeSignal, SignalResult } from './strategy/signals';
 import { DEFAULT_CONDITION_ID } from './strategy/conditions';
+import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
 import { setupConditionSchema, getMainSymbolConditions } from './services/conditionStore';
 import { WATCHLIST, ETF_SYMBOLS, MACRO_SERIES } from './watchlist';
@@ -121,8 +122,11 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     for (const symbol of WATCHLIST) {
       const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
       const pick = symbolConditions.get(symbol);
-      const buyConditionId = pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
-      const sellConditionId = pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
+      const override = MULTI_CONDITION_OVERRIDES[symbol];
+      // Fase 8: el override de 2-3 condiciones (si existe) tiene precedencia sobre el pick
+      // de 1 condición de symbol_conditions (Fase 7) - mismo patrón que HYBRID_CONFIG tier 1.
+      const buyConditionId = override?.buyExpr ?? pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
+      const sellConditionId = override?.sellExpr ?? pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
       signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId));
     }
 

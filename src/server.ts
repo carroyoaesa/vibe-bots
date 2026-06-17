@@ -22,6 +22,7 @@ import { getRecentOhlcBars, getRecentOhlcBars1H } from './services/marketStore';
 import { createMarketDataClient, getAdjustedCloses } from './services/marketData';
 import { buildChartSeries, buildChartSeries1H } from './strategy/chart';
 import { computeSignal } from './strategy/signals';
+import { labelConditionExpr } from './strategy/conditionExpr';
 import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
@@ -30,6 +31,7 @@ import { runBacktestForWatchlist } from './backtestRunner';
 import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
 import { setupConditionSchema, getSymbolConditions, getMainSymbolConditions } from './services/conditionStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
+import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
 
 // Evita que errores async no manejados (p.ej. Redis disconnect, Alpaca timeout) maten el proceso.
 // Node 18 termina en unhandledRejection por defecto; aquí lo degradamos a un log de error.
@@ -102,12 +104,15 @@ app.get('/api/trading/status', async (_req, res) => {
     const signals = await Promise.all(
       WATCHLIST.map(async (symbol) => {
         const latest = latestBySymbol.get(symbol);
+        const override = MULTI_CONDITION_OVERRIDES[symbol];
+        // Fase 8: mismo orden de precedencia que tradingRunner.ts - el override de
+        // 2-3 condiciones (si existe) gana sobre el pick de 1 condición de symbol_conditions.
         const signal = computeSignal(
           symbol,
           await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK),
           settings.riskProfile,
-          symbolConditions.get(symbol)?.buyConditionId ?? DEFAULT_CONDITION_ID,
-          symbolConditions.get(symbol)?.sellConditionId ?? DEFAULT_CONDITION_ID
+          override?.buyExpr ?? symbolConditions.get(symbol)?.buyConditionId ?? DEFAULT_CONDITION_ID,
+          override?.sellExpr ?? symbolConditions.get(symbol)?.sellConditionId ?? DEFAULT_CONDITION_ID
         );
 
         return {
@@ -349,6 +354,16 @@ app.get('/api/conditions', async (_req, res) => {
     for (const symbol of WATCHLIST) {
       const rows = symbolConditions.get(symbol);
       const buyHoldReturnPct = buyHoldReturns.get(symbol) ?? null;
+      const override = MULTI_CONDITION_OVERRIDES[symbol];
+      // Fase 8: si hay override, `buyConditionId`/`sellConditionId` deben reflejar la
+      // expresión REALMENTE activa (no la fila vieja de symbol_conditions, Fase 7) - pero
+      // trades/winRate/retorno/drawdown siguen siendo los de la última corrida de
+      // `npm run backtest` (1 condición, tier 1) porque ese loop no recalcula el override;
+      // `overrideTier` le avisa al frontend que esas métricas no son del combo activo.
+      const buyConditionId = override?.buyExpr;
+      const buyConditionLabel = override ? labelConditionExpr(override.buyExpr) : undefined;
+      const sellConditionId = override?.sellExpr;
+      const sellConditionLabel = override ? labelConditionExpr(override.sellExpr) : undefined;
 
       if (!rows || rows.length === 0) {
         const buyCondition = CONDITIONS.find((c) => c.id === DEFAULT_CONDITION_ID) ?? CONDITIONS[0];
@@ -356,10 +371,10 @@ app.get('/api/conditions', async (_req, res) => {
           symbol,
           timeframe: '1Day',
           system: 'main',
-          buyConditionId: buyCondition.id,
-          buyConditionLabel: buyCondition.label,
-          sellConditionId: buyCondition.id,
-          sellConditionLabel: buyCondition.label,
+          buyConditionId: buyConditionId ?? buyCondition.id,
+          buyConditionLabel: buyConditionLabel ?? buyCondition.label,
+          sellConditionId: sellConditionId ?? buyCondition.id,
+          sellConditionLabel: sellConditionLabel ?? buyCondition.label,
           trades: 0,
           winRatePct: null,
           totalReturnPct: 0,
@@ -367,6 +382,7 @@ app.get('/api/conditions', async (_req, res) => {
           maxDrawdownPct: 0,
           updatedAt: null,
           buyHoldReturnPct,
+          overrideTier: override?.tier ?? null,
         });
         continue;
       }
@@ -376,10 +392,10 @@ app.get('/api/conditions', async (_req, res) => {
           symbol,
           timeframe: row.timeframe,
           system: 'main',
-          buyConditionId: row.buyConditionId,
-          buyConditionLabel: row.buyConditionLabel,
-          sellConditionId: row.sellConditionId,
-          sellConditionLabel: row.sellConditionLabel,
+          buyConditionId: buyConditionId ?? row.buyConditionId,
+          buyConditionLabel: buyConditionLabel ?? row.buyConditionLabel,
+          sellConditionId: sellConditionId ?? row.sellConditionId,
+          sellConditionLabel: sellConditionLabel ?? row.sellConditionLabel,
           trades: row.trades,
           winRatePct: row.winRatePct,
           totalReturnPct: row.totalReturnPct,
@@ -387,6 +403,7 @@ app.get('/api/conditions', async (_req, res) => {
           maxDrawdownPct: row.maxDrawdownPct,
           updatedAt: row.updatedAt,
           buyHoldReturnPct,
+          overrideTier: override?.tier ?? null,
         });
       }
     }

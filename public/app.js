@@ -536,25 +536,51 @@ const CONDITION_CHART_CONFIG = {
 };
 
 /**
- * Combina los overlays de gráfico (Fase 6.1) de la condición de compra y la de venta
- * (Fase 7) cuando son distintas: los overlays de precio (`price`) de ambas se
- * concatenan (sin duplicar por `key`); el panel oscilador (`oscillator`) se toma de
- * la condición de compra si define uno, o de la de venta si no.
+ * Extrae los ids de condición conocidos (claves de `CONDITION_CHART_CONFIG`) presentes en
+ * una expresión de condición (Fase 8: puede ser un id simple - Fase 7 - o una combinación
+ * de 2-3 con AND/OR, p.ej. `"OR(bollinger_reversion+stochastic_cross+trend_pullback_sma50)"`
+ * o `"(sma_cross_10_30|williams_r_reversal)&bollinger_breakout"`). No necesita parsear la
+ * lógica AND/OR - alcanza con tokenizar identificadores y quedarse con los que matchean el
+ * catálogo; "AND"/"OR" nunca matchean ninguna clave, así que se descartan solos.
+ */
+function extractConditionIds(expr) {
+  const tokens = String(expr ?? '').match(/[A-Za-z0-9_]+/g) ?? [];
+  const seen = new Set();
+  const ids = [];
+  for (const tok of tokens) {
+    if (CONDITION_CHART_CONFIG[tok] && !seen.has(tok)) {
+      seen.add(tok);
+      ids.push(tok);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Combina los overlays de gráfico (Fase 6.1) de TODAS las condiciones hoja presentes en la
+ * expresión de compra y la de venta (Fase 8 - antes Fase 7 combinaba como máximo 2 ids
+ * simples): los overlays de precio (`price`) se concatenan (sin duplicar por `key`); el
+ * panel oscilador (`oscillator`) se toma de la primera condición (en orden compra, luego
+ * venta) que defina uno. Si ningún id de la expresión está en el catálogo (no debería
+ * pasar con condiciones válidas), no rompe - simplemente no hay overlays para ese gráfico.
  */
 function mergeConditionChartConfig(buyConditionId, sellConditionId) {
-  const buyConfig = CONDITION_CHART_CONFIG[buyConditionId] ?? {};
-  if (buyConditionId === sellConditionId) return buyConfig;
-
-  const sellConfig = CONDITION_CHART_CONFIG[sellConditionId] ?? {};
+  const ids = [...extractConditionIds(buyConditionId), ...extractConditionIds(sellConditionId)];
+  const uniqueIds = [...new Set(ids)];
 
   const priceByKey = new Map();
-  [...(buyConfig.price ?? []), ...(sellConfig.price ?? [])].forEach((overlay) => {
-    if (!priceByKey.has(overlay.key)) priceByKey.set(overlay.key, overlay);
-  });
+  let oscillator;
+  for (const id of uniqueIds) {
+    const config = CONDITION_CHART_CONFIG[id] ?? {};
+    (config.price ?? []).forEach((overlay) => {
+      if (!priceByKey.has(overlay.key)) priceByKey.set(overlay.key, overlay);
+    });
+    if (!oscillator && config.oscillator) oscillator = config.oscillator;
+  }
 
   return {
     price: Array.from(priceByKey.values()),
-    oscillator: buyConfig.oscillator ?? sellConfig.oscillator,
+    oscillator,
   };
 }
 
@@ -820,7 +846,22 @@ const COND_SHORT = {
   trend_pullback_sma50:'Tend.+SMA50',
 };
 
-function condShort(id) { return COND_SHORT[id] ?? id; }
+/**
+ * Forma corta para una condición o expresión de condición (Fase 8: puede ser un id
+ * simple - Fase 7, lookup directo - o una combinación de 2-3 con AND/OR). Para
+ * expresiones compuestas, sustituye cada id hoja conocido por su forma corta y
+ * conserva AND/OR/&/|/paréntesis tal cual, para no volcar la expresión cruda completa
+ * (puede tener 60+ caracteres) en un badge angosto.
+ */
+function condShort(id) {
+  if (!id) return id;
+  if (COND_SHORT[id] !== undefined) return COND_SHORT[id];
+  let short = id;
+  for (const [key, value] of Object.entries(COND_SHORT)) {
+    short = short.split(key).join(value);
+  }
+  return short;
+}
 
 // Clases CSS para la recomendación de Claude (paralelo a signalClass para la señal técnica).
 function aiRecClass(rec) {

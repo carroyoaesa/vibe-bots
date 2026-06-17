@@ -1,5 +1,6 @@
-import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, IndicatorContext, OhlcBar } from './conditions';
+import { buildIndicatorContext, computeEstimatedEntryPrice, DEFAULT_CONDITION_ID, IndicatorContext, OhlcBar } from './conditions';
 import { buildIndicatorContext1H, computeEstimatedEntryPrice1H } from './conditions1h';
+import { estimateConditionExprEntryPrice, evaluateConditionExpr, parseConditionExpr } from './conditionExpr';
 import { ExitMode, RISK_PROFILE, RiskProfile } from './config';
 
 export type BacktestExitReason = 'TP' | 'SL' | 'SELL_SIGNAL' | 'END_OF_DATA';
@@ -104,8 +105,8 @@ function runCombinedBacktestWith(
   buildCtx: (bars: OhlcBar[]) => IndicatorContext,
   computeEntryPrice: (ctx: IndicatorContext, i: number, conditionId: string) => number | null
 ): BacktestResult {
-  const buyCondition = CONDITIONS.find((c) => c.id === buyConditionId) ?? CONDITIONS[0];
-  const sellCondition = CONDITIONS.find((c) => c.id === sellConditionId) ?? CONDITIONS[0];
+  const buyExpr = parseConditionExpr(buyConditionId);
+  const sellExpr = parseConditionExpr(sellConditionId);
   const ctx = buildCtx(bars);
   const trades: BacktestTrade[] = [];
 
@@ -114,10 +115,10 @@ function runCombinedBacktestWith(
   let i = 1;
 
   while (i < bars.length) {
-    const action = buyCondition.evaluate(ctx, i);
+    const isBuy = evaluateConditionExpr(buyExpr, ctx, i, 'BUY');
 
-    if (action === 'BUY' && i + 1 < bars.length) {
-      const estimatedEntryPrice = computeEntryPrice(ctx, i, buyCondition.id);
+    if (isBuy && i + 1 < bars.length) {
+      const estimatedEntryPrice = estimateConditionExprEntryPrice(buyExpr, ctx, i, computeEntryPrice);
       const price = ctx.closes[i];
       const entryPrice = estimatedEntryPrice !== null ? Math.min(estimatedEntryPrice, price) : price;
 
@@ -151,7 +152,7 @@ function runCombinedBacktestWith(
             break;
           }
 
-          if (sellCondition.evaluate(ctx, j) === 'SELL') {
+          if (evaluateConditionExpr(sellExpr, ctx, j, 'SELL')) {
             exitDate = day.ts;
             exitPrice = day.close;
             exitReason = 'SELL_SIGNAL';

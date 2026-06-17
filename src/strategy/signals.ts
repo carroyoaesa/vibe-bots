@@ -1,5 +1,6 @@
-import { buildIndicatorContext, computeEstimatedEntryPrice, CONDITIONS, DEFAULT_CONDITION_ID, IndicatorContext, OhlcBar } from './conditions';
+import { buildIndicatorContext, computeEstimatedEntryPrice, DEFAULT_CONDITION_ID, IndicatorContext, OhlcBar } from './conditions';
 import { buildIndicatorContext1H, computeEstimatedEntryPrice1H, MIN_BARS_1H } from './conditions1h';
+import { describeConditionExpr, estimateConditionExprEntryPrice, evaluateConditionExpr, labelConditionExpr, parseConditionExpr } from './conditionExpr';
 import { RISK_PROFILE, RiskProfile } from './config';
 
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD';
@@ -25,7 +26,7 @@ export interface SignalResult {
 // condiciones de strategy/conditions.ts) esté disponible en `i` e `i-1`.
 const MIN_BARS = 51;
 
-function emptySignal(symbol: string, buyCondition: { id: string; label: string }, sellCondition: { id: string; label: string }, reason: string, price = 0): SignalResult {
+function emptySignal(symbol: string, buyConditionExpr: string, buyConditionLabel: string, sellConditionExpr: string, sellConditionLabel: string, reason: string, price = 0): SignalResult {
   return {
     symbol,
     price,
@@ -37,10 +38,10 @@ function emptySignal(symbol: string, buyCondition: { id: string; label: string }
     estimatedExitPrice: null,
     signal: 'HOLD',
     reason,
-    buyConditionId: buyCondition.id,
-    buyConditionLabel: buyCondition.label,
-    sellConditionId: sellCondition.id,
-    sellConditionLabel: sellCondition.label,
+    buyConditionId: buyConditionExpr,
+    buyConditionLabel,
+    sellConditionId: sellConditionExpr,
+    sellConditionLabel,
   };
 }
 
@@ -60,43 +61,45 @@ function computeSignalWith(
   buildCtx: (bars: OhlcBar[]) => IndicatorContext,
   computeEntryPrice: (ctx: IndicatorContext, i: number, conditionId: string) => number | null
 ): SignalResult {
-  const buyCondition = CONDITIONS.find((c) => c.id === buyConditionId) ?? CONDITIONS[0];
-  const sellCondition = CONDITIONS.find((c) => c.id === sellConditionId) ?? CONDITIONS[0];
+  const buyExpr = parseConditionExpr(buyConditionId);
+  const sellExpr = parseConditionExpr(sellConditionId);
+  const buyLabel = labelConditionExpr(buyConditionId);
+  const sellLabel = labelConditionExpr(sellConditionId);
 
   if (bars.length === 0) {
-    return emptySignal(symbol, buyCondition, sellCondition, 'Sin datos en market_bars (ejecutar npm run ingest primero)');
+    return emptySignal(symbol, buyConditionId, buyLabel, sellConditionId, sellLabel, 'Sin datos en market_bars (ejecutar npm run ingest primero)');
   }
 
   if (bars.length < minBars) {
-    return emptySignal(symbol, buyCondition, sellCondition, insufficientReason, bars[bars.length - 1].close);
+    return emptySignal(symbol, buyConditionId, buyLabel, sellConditionId, sellLabel, insufficientReason, bars[bars.length - 1].close);
   }
 
   const ctx = buildCtx(bars);
   const i = bars.length - 1;
 
-  const estimatedEntryPrice = computeEntryPrice(ctx, i, buyCondition.id);
+  const estimatedEntryPrice = estimateConditionExprEntryPrice(buyExpr, ctx, i, computeEntryPrice);
   // takeProfitPct=0 → modo signal_only sin TP (p.ej. PARALLEL_RISK_PROFILE): salida indefinida.
   const estimatedExitPrice = (estimatedEntryPrice !== null && riskProfile.takeProfitPct > 0)
     ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct)
     : null;
 
-  const buyAction = buyCondition.evaluate(ctx, i);
-  const sellAction = sellCondition.evaluate(ctx, i);
-  const action: SignalAction = buyAction === 'BUY' ? 'BUY' : sellAction === 'SELL' ? 'SELL' : 'HOLD';
+  const buyFires = evaluateConditionExpr(buyExpr, ctx, i, 'BUY');
+  const sellFires = evaluateConditionExpr(sellExpr, ctx, i, 'SELL');
+  const action: SignalAction = buyFires ? 'BUY' : sellFires ? 'SELL' : 'HOLD';
 
-  const sameCondition = buyCondition.id === sellCondition.id;
-  const buyDetails = buyCondition.describe(ctx, i);
-  const sellDetails = sameCondition ? buyDetails : sellCondition.describe(ctx, i);
+  const sameExpr = buyConditionId === sellConditionId;
+  const buyDetails = describeConditionExpr(buyExpr, ctx, i);
+  const sellDetails = sameExpr ? buyDetails : describeConditionExpr(sellExpr, ctx, i);
 
   let reason: string;
   if (action === 'BUY') {
-    reason = `BUY por "${buyCondition.label}" (${buyDetails})`;
+    reason = `BUY por "${buyLabel}" (${buyDetails})`;
   } else if (action === 'SELL') {
-    reason = `SELL por "${sellCondition.label}" (${sellDetails})`;
-  } else if (sameCondition) {
-    reason = `Sin señal (condición activa: "${buyCondition.label}"; ${buyDetails})`;
+    reason = `SELL por "${sellLabel}" (${sellDetails})`;
+  } else if (sameExpr) {
+    reason = `Sin señal (condición activa: "${buyLabel}"; ${buyDetails})`;
   } else {
-    reason = `Sin señal (compra: "${buyCondition.label}" ${buyDetails}; venta: "${sellCondition.label}" ${sellDetails})`;
+    reason = `Sin señal (compra: "${buyLabel}" ${buyDetails}; venta: "${sellLabel}" ${sellDetails})`;
   }
 
   return {
@@ -110,10 +113,10 @@ function computeSignalWith(
     estimatedExitPrice,
     signal: action,
     reason,
-    buyConditionId: buyCondition.id,
-    buyConditionLabel: buyCondition.label,
-    sellConditionId: sellCondition.id,
-    sellConditionLabel: sellCondition.label,
+    buyConditionId,
+    buyConditionLabel: buyLabel,
+    sellConditionId,
+    sellConditionLabel: sellLabel,
   };
 }
 
