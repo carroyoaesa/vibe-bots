@@ -127,7 +127,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       // de 1 condición de symbol_conditions (Fase 7) - mismo patrón que HYBRID_CONFIG tier 1.
       const buyConditionId = override?.buyExpr ?? pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
       const sellConditionId = override?.sellExpr ?? pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
-      signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId));
+      signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId, settings.exitMode));
     }
 
     // Fase de IA (Claude): gate de optimización de tokens.

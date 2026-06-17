@@ -878,7 +878,6 @@ const SIGNALS_TABLE_COLUMNS = [
   { key: 'aiRec',      type: 'string', getValue: (s) => s.aiRecommendation ?? '' },
   { key: 'conditions', type: 'string', getValue: (s) => (s.buyConditionId ?? '') + '→' + (s.sellConditionId ?? '') },
   { key: 'entryPrice', type: 'number', getValue: (s) => s.estimatedEntryPrice ?? null },
-  { key: 'exitPrice',  type: 'number', getValue: (s) => s.estimatedExitPrice ?? null },
   { key: 'reason',     type: 'string', getValue: (s) => s.simplifiedReason ?? s.reason ?? '' },
 ];
 
@@ -958,12 +957,11 @@ function setupSortableTable(tableId, sortState, onChange) {
 function renderSignalsSummaryTable() {
   signalsSummaryTableBody.innerHTML = '';
   if (latestSignals.length === 0) {
-    signalsSummaryTableBody.innerHTML = '<tr><td colspan="9" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+    signalsSummaryTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
   } else {
     const sorted = sortRows(latestSignals, SIGNALS_TABLE_COLUMNS, signalsSortState);
     sorted.forEach((signal) => {
       const entry = signal.estimatedEntryPrice != null ? fmtMoney(signal.estimatedEntryPrice) : '—';
-      const exit_ = signal.estimatedExitPrice != null ? fmtMoney(signal.estimatedExitPrice) : '—';
 
       // Condiciones combinadas: "BB Rev. → SMA10/30" (o solo "BB Rev." si son iguales).
       const buyShort = condShort(signal.buyConditionId);
@@ -993,7 +991,6 @@ function renderSignalsSummaryTable() {
         <td class="ai-rec-cell">${aiCell}</td>
         <td class="cond-cell">${condCell}</td>
         <td class="price-cell">${entry}</td>
-        <td class="price-cell">${exit_}</td>
         <td class="muted reason-cell">${motivo}</td>
       `;
       signalsSummaryTableBody.appendChild(tr);

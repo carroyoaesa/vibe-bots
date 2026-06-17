@@ -1,7 +1,7 @@
 import { buildIndicatorContext, computeEstimatedEntryPrice, DEFAULT_CONDITION_ID, IndicatorContext, OhlcBar } from './conditions';
 import { buildIndicatorContext1H, computeEstimatedEntryPrice1H, MIN_BARS_1H } from './conditions1h';
 import { describeConditionExpr, estimateConditionExprEntryPrice, evaluateConditionExpr, labelConditionExpr, parseConditionExpr } from './conditionExpr';
-import { RISK_PROFILE, RiskProfile } from './config';
+import { ExitMode, RISK_PROFILE, RiskProfile } from './config';
 
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD';
 
@@ -56,6 +56,7 @@ function computeSignalWith(
   riskProfile: RiskProfile,
   buyConditionId: string,
   sellConditionId: string,
+  exitMode: ExitMode,
   minBars: number,
   insufficientReason: string,
   buildCtx: (bars: OhlcBar[]) => IndicatorContext,
@@ -78,8 +79,11 @@ function computeSignalWith(
   const i = bars.length - 1;
 
   const estimatedEntryPrice = estimateConditionExprEntryPrice(buyExpr, ctx, i, computeEntryPrice);
-  // takeProfitPct=0 → modo signal_only sin TP (p.ej. PARALLEL_RISK_PROFILE): salida indefinida.
-  const estimatedExitPrice = (estimatedEntryPrice !== null && riskProfile.takeProfitPct > 0)
+  // El TP solo es un precio real de salida en modo 'bracket' (única orden que lo coloca en
+  // Alpaca, ver placeBracketBuyOrder). En 'signal_only' la salida es ÚNICAMENTE por señal
+  // SELL - mostrar un "precio est. de salida" ahí sería un TP teórico que ninguna orden usa
+  // (bug corregido: antes se calculaba igual en ambos modos, ver CLAUDE.md Fase 8.1).
+  const estimatedExitPrice = (estimatedEntryPrice !== null && exitMode === 'bracket' && riskProfile.takeProfitPct > 0)
     ? estimatedEntryPrice * (1 + riskProfile.takeProfitPct)
     : null;
 
@@ -134,7 +138,8 @@ export function computeSignal(
   bars: OhlcBar[],
   riskProfile: RiskProfile = RISK_PROFILE,
   buyConditionId: string = DEFAULT_CONDITION_ID,
-  sellConditionId: string = DEFAULT_CONDITION_ID
+  sellConditionId: string = DEFAULT_CONDITION_ID,
+  exitMode: ExitMode = 'bracket'
 ): SignalResult {
   return computeSignalWith(
     symbol,
@@ -142,6 +147,7 @@ export function computeSignal(
     riskProfile,
     buyConditionId,
     sellConditionId,
+    exitMode,
     MIN_BARS,
     `Histórico insuficiente para calcular indicadores (mínimo ${MIN_BARS} velas)`,
     buildIndicatorContext,
@@ -160,7 +166,8 @@ export function computeSignal1H(
   bars: OhlcBar[],
   riskProfile: RiskProfile = RISK_PROFILE,
   buyConditionId: string = DEFAULT_CONDITION_ID,
-  sellConditionId: string = DEFAULT_CONDITION_ID
+  sellConditionId: string = DEFAULT_CONDITION_ID,
+  exitMode: ExitMode = 'bracket'
 ): SignalResult {
   return computeSignalWith(
     symbol,
@@ -168,6 +175,7 @@ export function computeSignal1H(
     riskProfile,
     buyConditionId,
     sellConditionId,
+    exitMode,
     MIN_BARS_1H,
     `Histórico 1H insuficiente para calcular indicadores (mínimo ${MIN_BARS_1H} velas)`,
     buildIndicatorContext1H,

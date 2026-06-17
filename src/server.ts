@@ -112,7 +112,8 @@ app.get('/api/trading/status', async (_req, res) => {
           await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK),
           settings.riskProfile,
           override?.buyExpr ?? symbolConditions.get(symbol)?.buyConditionId ?? DEFAULT_CONDITION_ID,
-          override?.sellExpr ?? symbolConditions.get(symbol)?.sellConditionId ?? DEFAULT_CONDITION_ID
+          override?.sellExpr ?? symbolConditions.get(symbol)?.sellConditionId ?? DEFAULT_CONDITION_ID,
+          settings.exitMode
         );
 
         return {
