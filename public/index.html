@@ -116,6 +116,17 @@
           <h2>Backtest</h2>
           <button id="run-backtest">📊 Ejecutar backtest</button>
         </div>
+        <div class="filters">
+          <div class="filter-group">
+            <span class="filter-label">Grupo:</span>
+            <select class="filter-select" id="backtest-group-filter">
+              <option value="all">Todos</option>
+              <option value="aptos">✅ Aptos</option>
+              <option value="observados">🟡 Observados</option>
+              <option value="bloqueados">❌ Bloqueados</option>
+            </select>
+          </div>
+        </div>
         <div id="backtesting-period" class="muted"></div>
         <div id="backtesting-portfolio" class="muted"></div>
 

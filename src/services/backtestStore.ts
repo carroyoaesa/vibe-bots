@@ -26,6 +26,11 @@ export async function setupBacktestSchema(pool: Pool): Promise<void> {
       pnl_pct NUMERIC
     )
   `);
+
+  // Backtest segmentado por clasificación (`symbol_classifications`): NULL = corrida
+  // legacy sobre todo el watchlist (`runBacktestForWatchlist`, sin cambios); 'aptos' |
+  // 'observados' | 'bloqueados' = corrida acotada a ese grupo (`runBacktestForGroup`).
+  await pool.query(`ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS classification_group TEXT`);
 }
 
 export interface BacktestTradeInput {
@@ -45,14 +50,16 @@ export interface BacktestRunInput {
   params: unknown;
   summary: unknown;
   trades: BacktestTradeInput[];
+  /** 'aptos' | 'observados' | 'bloqueados' para una corrida segmentada, `null`/omitido para la corrida legacy sobre todo el watchlist. */
+  classificationGroup?: string | null;
 }
 
 export async function saveBacktestRun(pool: Pool, run: BacktestRunInput): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO backtest_runs (symbols, start_date, end_date, params, summary)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO backtest_runs (symbols, start_date, end_date, params, summary, classification_group)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id`,
-    [run.symbols, run.startDate, run.endDate, JSON.stringify(run.params), JSON.stringify(run.summary)]
+    [run.symbols, run.startDate, run.endDate, JSON.stringify(run.params), JSON.stringify(run.summary), run.classificationGroup ?? null]
   );
 
   const runId = result.rows[0].id;
@@ -76,6 +83,7 @@ export interface BacktestRunRow {
   endDate: string | null;
   params: unknown;
   summary: unknown;
+  classificationGroup: string | null;
 }
 
 export interface BacktestTradeRow {
@@ -94,13 +102,28 @@ export interface BacktestRunWithTrades {
   trades: BacktestTradeRow[];
 }
 
-export async function getLatestBacktestRun(pool: Pool): Promise<BacktestRunWithTrades | null> {
-  const runResult = await pool.query(
-    `SELECT id, run_at, symbols, start_date, end_date, params, summary
-     FROM backtest_runs
-     ORDER BY run_at DESC
-     LIMIT 1`
-  );
+/**
+ * Última corrida de backtest. Sin `group`, devuelve la más reciente sin importar el
+ * grupo (comportamiento histórico, usado por `/api/backtesting/results`). Con `group`
+ * (`'aptos'|'observados'|'bloqueados'`), filtra por `classification_group` (usado por
+ * `GET /api/backtest/results?group=...`).
+ */
+export async function getLatestBacktestRun(pool: Pool, group?: string | null): Promise<BacktestRunWithTrades | null> {
+  const runResult = group
+    ? await pool.query(
+        `SELECT id, run_at, symbols, start_date, end_date, params, summary, classification_group
+         FROM backtest_runs
+         WHERE classification_group = $1
+         ORDER BY run_at DESC
+         LIMIT 1`,
+        [group]
+      )
+    : await pool.query(
+        `SELECT id, run_at, symbols, start_date, end_date, params, summary, classification_group
+         FROM backtest_runs
+         ORDER BY run_at DESC
+         LIMIT 1`
+      );
 
   if (runResult.rows.length === 0) {
     return null;
@@ -115,6 +138,7 @@ export async function getLatestBacktestRun(pool: Pool): Promise<BacktestRunWithT
     endDate: row.end_date,
     params: row.params,
     summary: row.summary,
+    classificationGroup: row.classification_group,
   };
 
   const tradesResult = await pool.query(

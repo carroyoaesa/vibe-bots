@@ -11,6 +11,32 @@ export function createAlpacaClient(config: AlpacaConfig): AxiosInstance {
   });
 }
 
+export type ClassificationGroup = 'aptos' | 'observados' | 'bloqueados';
+
+/**
+ * Cliente Alpaca por grupo de clasificación (`symbol_classifications`), credenciales
+ * leídas de `ALPACA_<GRUPO>_KEY`/`_SECRET`/`_ENDPOINT` en `secure/keys.env` - nunca
+ * hardcodeadas ni logueadas. Si el grupo no tiene las 3 variables configuradas, devuelve
+ * `null` (solo se loguea el nombre del grupo, jamás credenciales) y el caller debe
+ * degradar a backtest interno sin enviar nada a Alpaca. Hoy esto NO rutea órdenes
+ * reales por cuenta - es infraestructura lista para una fase futura.
+ */
+export function getAlpacaClient(group: ClassificationGroup): AxiosInstance | null {
+  const prefix = group.toUpperCase();
+  const apiKey = process.env[`ALPACA_${prefix}_KEY`];
+  const apiSecret = process.env[`ALPACA_${prefix}_SECRET`];
+  const endpoint = process.env[`ALPACA_${prefix}_ENDPOINT`];
+
+  if (!apiKey || !apiSecret || !endpoint) {
+    console.warn(`[getAlpacaClient] Sin credenciales para el grupo '${group}' (ALPACA_${prefix}_KEY/_SECRET/_ENDPOINT) - modo backtest interno, sin Alpaca.`);
+    return null;
+  }
+
+  // El baseURL de axios no debe incluir '/v2' - cada request lo agrega (ver resto de este archivo).
+  const baseUrl = endpoint.replace(/\/v2\/?$/, '');
+  return createAlpacaClient({ apiKey, apiSecret, baseUrl });
+}
+
 export interface AlpacaAccountSummary {
   accountNumber: string;
   status: string;

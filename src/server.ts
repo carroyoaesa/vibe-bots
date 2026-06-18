@@ -27,7 +27,7 @@ import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
-import { runBacktestForWatchlist } from './backtestRunner';
+import { runBacktestForWatchlist, runBacktestForGroup, runBacktestForAllGroups, BACKTEST_GROUPS, BacktestGroup } from './backtestRunner';
 import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
 import { setupConditionSchema, getSymbolConditions, getMainSymbolConditions } from './services/conditionStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
@@ -314,6 +314,62 @@ app.get('/api/backtesting/results', async (_req, res) => {
     await setupBacktestSchema(pool);
     const run = await getLatestBacktestRun(pool);
     res.json({ ok: true, generatedAt: new Date().toISOString(), run });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+const VALID_BACKTEST_GROUPS = [...BACKTEST_GROUPS, 'all'];
+
+// Backtest segmentado por clasificación (backtest-by-classification, Fase 10) - rutas nuevas,
+// no reemplazan /api/backtesting/run|results (legacy, sin filtrar por grupo, sin cambios).
+app.post('/api/backtest/run', async (req, res) => {
+  const group = req.body?.group;
+
+  if (!VALID_BACKTEST_GROUPS.includes(group)) {
+    res.status(400).json({ ok: false, error: `group inválido: debe ser uno de ${VALID_BACKTEST_GROUPS.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupBacktestSchema(pool);
+
+    if (group === 'all') {
+      const results = await runBacktestForAllGroups(pool);
+      res.json({ ok: true, finishedAt: new Date().toISOString(), group: 'all', results });
+    } else {
+      const result = await runBacktestForGroup(pool, group as BacktestGroup);
+      res.json({ ok: true, finishedAt: new Date().toISOString(), group, ...result });
+    }
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      finishedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/backtest/results', async (req, res) => {
+  const group = req.query.group as string | undefined;
+
+  if (group !== undefined && !BACKTEST_GROUPS.includes(group as BacktestGroup)) {
+    res.status(400).json({ ok: false, error: `group inválido: debe ser uno de ${BACKTEST_GROUPS.join(', ')} (u omitirse).` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupBacktestSchema(pool);
+    const run = await getLatestBacktestRun(pool, group ?? null);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), group: group ?? null, run });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {
