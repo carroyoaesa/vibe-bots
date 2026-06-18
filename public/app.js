@@ -26,6 +26,7 @@ const conditionsTableBody = document.querySelector('#conditions-table tbody');
 const conditionsTableNote = document.getElementById('conditions-table-note');
 const runBacktestBtn = document.getElementById('run-backtest');
 const backtestingResult = document.getElementById('backtesting-result');
+const backtestGroupFilter = document.getElementById('backtest-group-filter');
 
 const resumenTableBody = document.querySelector('#resumen-table tbody');
 const resumenCount = document.getElementById('resumen-count');
@@ -1030,6 +1031,7 @@ function aiRecClass(rec) {
 
 const CONDITIONS_TABLE_COLUMNS = [
   { key: 'symbol', type: 'string', getValue: (c) => c.symbol },
+  { key: 'group', type: 'string', getValue: (c) => STATUS_TO_BACKTEST_GROUP[state.classifications[c.symbol] ?? 'apto'] },
   { key: 'system', type: 'string', getValue: (c) => c.systemLabel ?? '' },
   { key: 'buyCondition', type: 'string', getValue: (c) => c.buyConditionLabel },
   { key: 'sellCondition', type: 'string', getValue: (c) => c.sellConditionLabel },
@@ -1057,6 +1059,7 @@ const conditionsSortState = { key: null, direction: 'asc' };
 const resumenSortState = { key: 'symbol', direction: 'asc' };
 
 let latestConditions = [];
+let lastBacktestingRun = null;
 
 function compareValues(va, vb, type, direction) {
   const dir = direction === 'desc' ? -1 : 1;
@@ -1368,16 +1371,29 @@ function renderSidebarPositions(positions) {
     : `<strong>${positions.length}</strong> posiciones abiertas`;
 }
 
+// Mapea el value del selector de grupo (Backtest) al status de symbol_classifications.
+const BACKTEST_GROUP_TO_STATUS = { aptos: 'apto', observados: 'observar', bloqueados: 'bloqueado' };
+const STATUS_TO_BACKTEST_GROUP = { apto: 'aptos', observar: 'observados', bloqueado: 'bloqueados' };
+
+function getConditionsRowsForGroup() {
+  const group = backtestGroupFilter.value;
+  if (group === 'all') return latestConditions;
+  const status = BACKTEST_GROUP_TO_STATUS[group];
+  return latestConditions.filter((c) => (state.classifications[c.symbol] ?? 'apto') === status);
+}
+
 function renderConditionsTable() {
   conditionsTableBody.innerHTML = '';
-  if (latestConditions.length === 0) {
-    conditionsTableBody.innerHTML = '<tr><td colspan="11" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
+  const rows = getConditionsRowsForGroup();
+  if (rows.length === 0) {
+    conditionsTableBody.innerHTML = '<tr><td colspan="12" class="muted">Sin datos todavía. Ejecutá un backtest.</td></tr>';
   } else {
-    const sorted = sortRows(latestConditions, CONDITIONS_TABLE_COLUMNS, conditionsSortState);
+    const sorted = sortRows(rows, CONDITIONS_TABLE_COLUMNS, conditionsSortState);
     sorted.forEach((c) => {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${c.symbol}</td>
+        <td>${accountBadge(STATUS_TO_BACKTEST_GROUP[state.classifications[c.symbol] ?? 'apto'])}</td>
         <td class="muted">${c.systemLabel ?? ''}</td>
         <td>${conditionBadge(c.buyConditionId, c.buyConditionLabel)}</td>
         <td>${conditionBadge(c.sellConditionId, c.sellConditionLabel)}</td>
@@ -1394,6 +1410,32 @@ function renderConditionsTable() {
   }
   updateSortIndicators('conditions-table', conditionsSortState);
 }
+
+/**
+ * Aplica el grupo seleccionado en el selector de Backtest: 'all' reusa el último run
+ * legacy/general ya cargado por loadSymbolReports (sin refetch); un grupo específico
+ * pide su propio último run segmentado a GET /api/backtest/results?group=. En ambos
+ * casos también refiltra #conditions-table (client-side, por symbol_classifications).
+ */
+async function loadBacktestGroupView() {
+  const group = backtestGroupFilter.value;
+
+  if (group === 'all') {
+    renderBacktestingSummary(lastBacktestingRun);
+  } else {
+    try {
+      const res = await fetch(`/api/backtest/results?group=${group}`);
+      const data = await res.json();
+      renderBacktestingSummary(data.ok ? data.run : null);
+    } catch (error) {
+      backtestingPeriod.textContent = `Error al cargar el backtest del grupo: ${error}`;
+    }
+  }
+
+  renderConditionsTable();
+}
+
+backtestGroupFilter.addEventListener('change', loadBacktestGroupView);
 
 async function loadSymbolReports() {
   try {
@@ -1425,7 +1467,7 @@ async function loadSymbolReports() {
     const positionsBySymbol = new Map(positions.map((p) => [p.symbol, p]));
 
     const run = backtestingData.ok ? backtestingData.run : null;
-    renderBacktestingSummary(run);
+    lastBacktestingRun = run;
     const backtestSummaryBySymbol = new Map(
       (run?.run?.summary?.symbols ?? []).map((s) => [s.symbol, s])
     );
@@ -1474,7 +1516,7 @@ async function loadSymbolReports() {
     });
 
     renderResumenTable();
-    renderConditionsTable();
+    await loadBacktestGroupView();
     if (state.selectedSymbol) renderDetail();
 
     await loadOperations();
@@ -1553,10 +1595,17 @@ async function loadSnapshots() {
 }
 
 async function runBacktest() {
+  const group = backtestGroupFilter.value;
   runBacktestBtn.disabled = true;
-  backtestingResult.textContent = 'Ejecutando backtest...';
+  backtestingResult.textContent = group === 'all'
+    ? 'Ejecutando backtest (aptos, observados, bloqueados)...'
+    : `Ejecutando backtest (grupo: ${group})...`;
   try {
-    const res = await fetch('/api/backtesting/run', { method: 'POST' });
+    const res = await fetch('/api/backtest/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group }),
+    });
     const data = await res.json();
     backtestingResult.textContent = JSON.stringify(data, null, 2);
     if (data.ok) {

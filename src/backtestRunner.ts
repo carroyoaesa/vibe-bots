@@ -6,8 +6,21 @@ import { CONDITIONS, DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { saveBacktestRun } from './services/backtestStore';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
 import { setupConditionSchema, saveSymbolConditions, SymbolConditionPick } from './services/conditionStore';
+import { setupSymbolClassificationSchema, getSymbolsByClassification, SymbolClassificationStatus } from './services/symbolClassificationStore';
 import { STRATEGY_PARAMS } from './strategy/config';
 import { HYBRID_CONFIG } from './strategy/hybridConfig';
+import { AccountGroup } from './services/alpaca';
+
+/** Grupo de backtest segmentado (`backtest-by-classification`) - mismo grupo que usa la sync multi-cuenta (`services/alpaca.ts#AccountGroup`), mapea 1:1 a `SymbolClassificationStatus`. */
+export type BacktestGroup = AccountGroup;
+
+const GROUP_TO_STATUS: Record<BacktestGroup, SymbolClassificationStatus> = {
+  aptos: 'apto',
+  observados: 'observar',
+  bloqueados: 'bloqueado',
+};
+
+export const BACKTEST_GROUPS: BacktestGroup[] = ['aptos', 'observados', 'bloqueados'];
 
 export interface PortfolioBacktestSummary {
   symbols: number;
@@ -27,10 +40,20 @@ export interface BacktestRunResult {
   trades: BacktestTrade[];
 }
 
-export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunResult> {
+/**
+ * Núcleo del backtest (144 combos por símbolo + persistencia), parametrizado por la
+ * lista de símbolos a cubrir - `runBacktestForWatchlist` (legacy, sin filtrar por
+ * clasificación) y `runBacktestForGroup` (Fase 10, segmentado por `symbol_classifications`)
+ * son wrappers de esta misma función, solo cambia el universo de símbolos.
+ * `classificationGroup` se persiste en `backtest_runs.classification_group` (`null` para
+ * la corrida legacy) - no afecta ningún cálculo, solo etiqueta el resultado guardado.
+ */
+async function runBacktestForSymbols(pool: Pool, symbols: string[], classificationGroup: BacktestGroup | null): Promise<BacktestRunResult> {
   await setupSettingsSchema(pool);
   await setupConditionSchema(pool);
   const settings = await getSettings(pool);
+
+  console.log(`[backtest] grupo='${classificationGroup ?? 'all (legacy)'}' - ${symbols.length} símbolos: ${symbols.join(', ')}`);
 
   const symbolSummaries: SymbolBacktestSummary[] = [];
   const trades: BacktestTrade[] = [];
@@ -40,7 +63,7 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
 
   const defaultCondition = CONDITIONS.find((c) => c.id === DEFAULT_CONDITION_ID) ?? CONDITIONS[0];
 
-  for (const symbol of WATCHLIST) {
+  for (const symbol of symbols) {
     const bars = await getAllBars(pool, symbol);
     const hybrid = HYBRID_CONFIG[symbol];
 
@@ -156,7 +179,7 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
   }
 
   const portfolio: PortfolioBacktestSummary = {
-    symbols: WATCHLIST.length,
+    symbols: symbols.length,
     totalTrades,
     avgReturnPct: withTrades.length > 0
       ? withTrades.reduce((sum, s) => sum + s.totalReturnPct, 0) / withTrades.length
@@ -169,9 +192,10 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
   };
 
   const runId = await saveBacktestRun(pool, {
-    symbols: WATCHLIST,
+    symbols,
     startDate,
     endDate,
+    classificationGroup,
     params: {
       strategy: STRATEGY_PARAMS,
       risk: settings.riskProfile,
@@ -193,4 +217,30 @@ export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunRe
   await saveSymbolConditions(pool, picks);
 
   return { runId, startDate, endDate, symbolSummaries, portfolio, trades };
+}
+
+/** Backtest legacy sobre todo el watchlist (27 símbolos), sin filtrar por clasificación - comportamiento histórico, sin cambios. */
+export async function runBacktestForWatchlist(pool: Pool): Promise<BacktestRunResult> {
+  return runBacktestForSymbols(pool, WATCHLIST, null);
+}
+
+/** Backtest acotado a los símbolos de un grupo de clasificación (`symbol_classifications`). */
+export async function runBacktestForGroup(pool: Pool, group: BacktestGroup): Promise<BacktestRunResult> {
+  await setupSymbolClassificationSchema(pool);
+  const symbols = await getSymbolsByClassification(pool, GROUP_TO_STATUS[group]);
+  return runBacktestForSymbols(pool, symbols, group);
+}
+
+export interface BacktestGroupRunResult extends BacktestRunResult {
+  group: BacktestGroup;
+}
+
+/** Corre los 3 grupos (aptos/observados/bloqueados) secuencialmente - usado por `group: 'all'` en `POST /api/backtest/run`. */
+export async function runBacktestForAllGroups(pool: Pool): Promise<BacktestGroupRunResult[]> {
+  const results: BacktestGroupRunResult[] = [];
+  for (const group of BACKTEST_GROUPS) {
+    const result = await runBacktestForGroup(pool, group);
+    results.push({ ...result, group });
+  }
+  return results;
 }

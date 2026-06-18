@@ -89,6 +89,12 @@ export async function getSymbolClassification(pool: Pool, symbol: string): Promi
   return bySymbol.get(symbol) ?? 'apto';
 }
 
+/** Símbolos del watchlist cuya clasificación actual es `status` (sin fila = 'apto'). */
+export async function getSymbolsByClassification(pool: Pool, status: SymbolClassificationStatus): Promise<string[]> {
+  const bySymbol = await loadAll(pool);
+  return WATCHLIST.filter((symbol) => (bySymbol.get(symbol) ?? 'apto') === status);
+}
+
 export async function setSymbolClassification(
   pool: Pool,
   symbol: string,
