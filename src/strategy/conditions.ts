@@ -414,3 +414,93 @@ export function computeEstimatedEntryPrice(ctx: IndicatorContext, i: number, con
   // rsi_reversal_30_70: mapeo RSI→precio es path-dependent (avgGain/avgLoss); usamos precio actual
   return price;
 }
+
+/**
+ * Nivel de precio que activaría la condición de VENTA en el bar `i` (Fase Operaciones
+ * multi-cuenta, 2026-06-18) - análogo a `computeEstimatedEntryPrice` pero para el umbral
+ * SELL de `evaluate()`, que para varias condiciones es un nivel DISTINTO al de compra
+ * (ej. `bollinger_breakout`: BUY en `bbUpper`, SELL en `bbMiddle`; `donchian_breakout_20`:
+ * BUY en `priorHigh20`, SELL en `priorLow10`).
+ *
+ * Causa raíz del bug "GOOGL sin precio de salida estimado": antes de esta función, el único
+ * "precio de salida" del sistema era el take-profit teórico de `signals.ts`
+ * (`estimatedEntryPrice * (1+takeProfitPct)`), que solo existe si `exit_mode='bracket'` - con
+ * el preset activo `signal_only` (default desde Fase 7) ese valor es SIEMPRE `null`,
+ * independientemente del símbolo. Esta función es independiente del modo de salida: calcula
+ * el nivel de la condición de venta ACTIVA en el estado actual del indicador.
+ *
+ * A diferencia de `computeEstimatedEntryPrice` (que por compatibilidad histórica cae a
+ * `price` cuando no hay nivel proyectable), esta función devuelve `null` en ese caso - el
+ * caller debe mostrar "no proyectable" en vez de un número que parecería un nivel real.
+ * Guard rail uniforme: si el resultado es `<= 0` o `> 10×price`, se descarta (`null` + warning).
+ */
+export function computeEstimatedExitLevel(ctx: IndicatorContext, i: number, conditionId: string, scale = 1): number | null {
+  const price = ctx.closes[i];
+  let raw: number | null;
+
+  switch (conditionId) {
+    // Cruce SMA/EMA/MACD: el nivel de igualdad fast=slow es el MISMO punto de cruce en
+    // ambas direcciones (subir = BUY, bajar = SELL) - reusa la proyección analítica de entrada.
+    case 'sma_cross_10_30':
+    case 'sma_cross_20_50':
+    case 'ema_cross_12_26':
+    case 'macd_cross':
+      raw = computeEstimatedEntryPrice(ctx, i, conditionId, scale);
+      break;
+
+    case 'bollinger_reversion': // SELL: precio cruza sobre la banda media (ver evaluate())
+    case 'bollinger_breakout':  // SELL: precio cae bajo la banda media
+      raw = ctx.bbMiddle[i];
+      break;
+
+    case 'donchian_breakout_20': // SELL: ruptura del mínimo de 10 sesiones (no el máximo de 20 de la entrada)
+      raw = ctx.priorLow10[i];
+      break;
+
+    case 'trend_pullback_sma50': // SELL: precio cae bajo SMA50
+      raw = ctx.sma50[i];
+      break;
+
+    case 'stochastic_cross': { // %K = 80 → Close = Low + 0.80 × (High − Low)
+      const period = 14 * scale;
+      const recentBars = ctx.bars.slice(Math.max(0, i - period + 1), i + 1);
+      const high = Math.max(...recentBars.map((b) => b.high));
+      const low = Math.min(...recentBars.map((b) => b.low));
+      const range = high - low;
+      raw = range > 0 ? low + 0.8 * range : null;
+      break;
+    }
+
+    case 'williams_r_reversal': { // %R = −20 → Close = High − 0.20 × (High − Low)
+      const period = 14 * scale;
+      const recentBars = ctx.bars.slice(Math.max(0, i - period + 1), i + 1);
+      const high = Math.max(...recentBars.map((b) => b.high));
+      const low = Math.min(...recentBars.map((b) => b.low));
+      const range = high - low;
+      raw = range > 0 ? high - 0.2 * range : null;
+      break;
+    }
+
+    case 'cci_reversal': { // CCI = +100 → Close = SMA20 + 1.5 × MeanDesviation20
+      const sma = ctx.sma20[i];
+      if (sma === null) { raw = null; break; }
+      const period = 20 * scale;
+      const recentCloses = ctx.closes.slice(Math.max(0, i - period + 1), i + 1);
+      const meanDev = recentCloses.reduce((s, c) => s + Math.abs(c - sma), 0) / recentCloses.length;
+      raw = sma + 1.5 * meanDev;
+      break;
+    }
+
+    // rsi_reversal_30_70: el mapeo RSI→precio es path-dependent (avgGain/avgLoss histórico) -
+    // no hay nivel proyectable estable, a diferencia de la entrada (que cae a `price`).
+    default:
+      raw = null;
+  }
+
+  if (raw === null) return null;
+  if (raw <= 0 || raw > price * 10) {
+    console.warn(`[computeEstimatedExitLevel] Valor fuera de rango (${raw.toFixed(2)}) para condición '${conditionId}', price=${price.toFixed(2)} - descartado (null)`);
+    return null;
+  }
+  return raw;
+}

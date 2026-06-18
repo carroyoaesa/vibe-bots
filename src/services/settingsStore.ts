@@ -30,6 +30,12 @@ export async function setupSettingsSchema(pool: Pool): Promise<void> {
   // una orden simple (placeBuyOrder, sin TP/SL) y la posición se cierra únicamente cuando la
   // condición activa emite señal SELL (closePosition en runTradingCycle, sin cambios).
   await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS exit_mode TEXT NOT NULL DEFAULT 'bracket'`);
+
+  // Fase Operaciones multi-cuenta (2026-06-18): minutos que una orden BUY puede quedar
+  // pendiente antes de considerarse "huérfana" (cancelStaleOrders, services/preTradeCheck.ts) -
+  // y si esa cancelación corre automática (default false: solo se detecta/loguea/muestra en UI).
+  await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS pending_order_timeout_min INTEGER NOT NULL DEFAULT 60`);
+  await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS auto_cancel_stale_orders BOOLEAN NOT NULL DEFAULT FALSE`);
 }
 
 export interface BotSettings {
@@ -38,11 +44,13 @@ export interface BotSettings {
   claudeModel: string | null;
   tradingEnabled: boolean;
   exitMode: ExitMode;
+  pendingOrderTimeoutMin: number;
+  autoCancelStaleOrders: boolean;
 }
 
 export async function getSettings(pool: Pool): Promise<BotSettings> {
   const result = await pool.query(
-    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, exit_mode
+    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, exit_mode, pending_order_timeout_min, auto_cancel_stale_orders
      FROM bot_settings WHERE id = 1`
   );
 
@@ -59,7 +67,13 @@ export async function getSettings(pool: Pool): Promise<BotSettings> {
     claudeModel: row.claude_model,
     tradingEnabled: row.trading_enabled,
     exitMode: row.exit_mode,
+    pendingOrderTimeoutMin: Number(row.pending_order_timeout_min),
+    autoCancelStaleOrders: row.auto_cancel_stale_orders,
   };
+}
+
+export async function setAutoCancelStaleOrders(pool: Pool, enabled: boolean): Promise<void> {
+  await pool.query(`UPDATE bot_settings SET auto_cancel_stale_orders = $1, updated_at = NOW() WHERE id = 1`, [enabled]);
 }
 
 export async function saveSettings(pool: Pool, settings: Pick<BotSettings, 'riskPreset' | 'riskProfile' | 'claudeModel' | 'exitMode'>): Promise<void> {

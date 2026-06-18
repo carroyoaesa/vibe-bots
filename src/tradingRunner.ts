@@ -29,7 +29,7 @@ import {
   AlpacaOrder,
 } from './services/alpaca';
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './services/tradingStore';
-import { setupSymbolClassificationSchema, getSymbolClassification } from './services/symbolClassificationStore';
+import { setupSymbolClassificationSchema, getSymbolClassification, classificationToAccountGroup } from './services/symbolClassificationStore';
 import { computeSignal, SignalResult } from './strategy/signals';
 import { DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
@@ -37,6 +37,8 @@ import { setupSettingsSchema, getSettings } from './services/settingsStore';
 import { setupConditionSchema, getMainSymbolConditions } from './services/conditionStore';
 import { WATCHLIST, ETF_SYMBOLS, MACRO_SERIES } from './watchlist';
 import { createAnthropicClient, assessWatchlist, SymbolAssessment, SymbolAssessmentContext } from './services/claude';
+import { canPlaceBuyOrder, invalidateBuyCheck } from './services/preTradeCheck';
+import { cancelStaleOrders } from './services/staleOrders';
 
 // Velas (OHLC diarias) pedidas por símbolo para calcular la condición activa (Fase 6):
 // suficiente warm-up para SMA50/EMA26/MACD/Bollinger/Stochastic/CCI/Donchian.
@@ -97,6 +99,15 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     const account = await getAccount(alpacaClient);
     const positions = await getPositions(alpacaClient);
     const openOrders = await getOpenOrders(alpacaClient);
+
+    // Detección de órdenes BUY huérfanas (>pending_order_timeout_min pendientes) - una vez
+    // por ciclo de trading (no en el poller de 60s). Por defecto solo loguea/devuelve la
+    // lista (bot_settings.auto_cancel_stale_orders=false) - la UI las muestra para que el
+    // usuario decida cancelarlas manualmente.
+    const { stale: staleOrders } = await cancelStaleOrders(alpacaClient, openOrders, settings.pendingOrderTimeoutMin, settings.autoCancelStaleOrders);
+    if (staleOrders.length > 0) {
+      console.warn(`[runTradingCycle] ${staleOrders.length} orden(es) BUY huérfana(s) detectada(s): ${staleOrders.map((o) => `${o.symbol}(${o.id})`).join(', ')}`);
+    }
 
     // Refresca la caché de estado de Alpaca (cuenta, posiciones, órdenes abiertas) que usa
     // /api/trading/status, para que el siguiente poll del dashboard no repita estas llamadas.
@@ -225,7 +236,17 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           }
         }
 
-        const signalId = await saveSignal(pool, signal, 'main', '1Day');
+        const position = positionsBySymbol.get(symbol);
+        const symbolOpenOrders = openOrdersBySymbol.get(symbol) ?? [];
+
+        // Grupo de cuenta derivado de la clasificación ACTUAL del símbolo (Fase Operaciones
+        // multi-cuenta) - solo etiqueta trading_signals/trading_orders.account_group para que
+        // la tab "Operaciones" pueda filtrar; NO rutea la orden real a esa cuenta todavía
+        // (sigue siendo la única cuenta de ALPACA_API_KEY/SECRET/BASE_URL).
+        const classification = await getSymbolClassification(pool, symbol);
+        const accountGroup = classificationToAccountGroup(classification);
+
+        const signalId = await saveSignal(pool, signal, 'main', '1Day', accountGroup);
 
         if (assessment && assessmentModel) {
           await saveAssessment(pool, {
@@ -241,29 +262,35 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           });
         }
 
-        const position = positionsBySymbol.get(symbol);
-        const symbolOpenOrders = openOrdersBySymbol.get(symbol) ?? [];
-
         if (!settings.tradingEnabled && signal.signal !== 'HOLD') {
           // Interruptor ON/OFF del dashboard: bloquea tanto compras como ventas, pero las
           // señales y evaluaciones de IA ya se calcularon/guardaron arriba normalmente.
           actions.push({ type: 'TRADING_DISABLED', symbol });
         } else if (signal.signal === 'BUY') {
-          const classification = await getSymbolClassification(pool, symbol);
+          const estimatedOrderValue = account.equity * settings.riskProfile.positionSizePct;
 
-          if (classification === 'bloqueado') {
-            console.log(`[${symbol}] BUY bloqueado por clasificación manual (BLOQUEADO_MANUAL)`);
-            actions.push({ type: 'NO_ACTION', symbol, reason: 'BLOQUEADO_MANUAL' });
-          } else if (position) {
-            actions.push({ type: 'NO_ACTION', symbol, reason: 'Ya existe una posición abierta' });
-          } else if (symbolOpenOrders.length > 0) {
-            actions.push({ type: 'NO_ACTION', symbol, reason: 'Ya hay una orden pendiente' });
-          } else if (openPositionsCount >= settings.riskProfile.maxPositions) {
-            actions.push({ type: 'NO_ACTION', symbol, reason: `Máximo de posiciones alcanzado (${settings.riskProfile.maxPositions})` });
+          // Pre-trade check unificado (Fase Operaciones multi-cuenta) - reemplaza la cadena
+          // de ifs anterior (clasificación/posición/orden pendiente/máx. posiciones) por una
+          // sola función con reason codes explícitos. Fix del bug de duplicación: antes se
+          // chequeaba "¿alguna orden abierta?" sin filtrar por lado; PENDING_BUY_ORDER filtra
+          // específicamente órdenes side='buy', y queda visible en NO_ACTION.reason para la UI.
+          const buyCheck = await canPlaceBuyOrder(pool, symbol, accountGroup, {
+            position,
+            openOrders: symbolOpenOrders,
+            openPositionsCount,
+            maxPositions: settings.riskProfile.maxPositions,
+            equity: account.equity,
+            positionSizePct: settings.riskProfile.positionSizePct,
+            estimatedOrderValue,
+          });
+
+          if (!buyCheck.allowed) {
+            console.log(`[${symbol}] BUY bloqueado: ${buyCheck.reason}${buyCheck.orderId ? ` (orden pendiente ${buyCheck.orderId})` : ''}`);
+            actions.push({ type: 'NO_ACTION', symbol, reason: buyCheck.reason! });
           } else if (assessment?.recommendation === 'avoid') {
             actions.push({ type: 'AI_BLOCKED', symbol, reason: assessment.rationale });
           } else {
-            const positionValue = account.equity * settings.riskProfile.positionSizePct;
+            const positionValue = estimatedOrderValue;
             // Ajusta qty si excede el buying power disponible (ocurre con flujo_de_caja
             // cuando hay >13 posiciones abiertas y se empieza a usar margen).
             let qty = Math.floor(positionValue / signal.price);
@@ -305,8 +332,10 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
                 alpacaOrderId: order.id,
                 status: order.status,
                 raw: order,
+                accountGroup,
               });
 
+              invalidateBuyCheck(accountGroup, symbol);
               actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id });
               openPositionsCount += 1;
             }
@@ -330,8 +359,10 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
               alpacaOrderId: closeOrder.id,
               status: closeOrder.status,
               raw: closeOrder,
+              accountGroup,
             });
 
+            invalidateBuyCheck(accountGroup, symbol);
             actions.push({ type: 'CLOSE_POSITION', symbol, qty: position.qty, alpacaOrderId: closeOrder.id });
             openPositionsCount -= 1;
           }
@@ -342,6 +373,10 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         actions.push({ type: 'ERROR', symbol, error: error instanceof Error ? error.message : String(error) });
       }
     }
+
+    // Fin del ciclo: invalida toda la caché de canPlaceBuyOrder (30s) - el próximo ciclo
+    // (cron horario) debe recalcular con datos frescos de Alpaca, no con la decisión cacheada.
+    invalidateBuyCheck();
 
     // Snapshot crudo del ciclo en MinIO (Fase 3) - no debe romper el ciclo de trading si falla.
     let snapshotKey: string | null = null;

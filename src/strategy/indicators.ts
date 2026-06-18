@@ -65,14 +65,29 @@ export function rsiSeries(values: number[], period: number): (number | null)[] {
  * Estima el cierre de la próxima sesión que haría que la SMA rápida alcance el
  * valor actual de `smaSlow` (aproximación de "precio de entrada" para un cruce
  * alcista, asumiendo que la SMA lenta no cambia significativamente con un dato nuevo).
+ *
+ * ⚠️ Guard rail (auditoría 2026-06-18, bug MU): la fórmula `fastPeriod*smaSlow - sumPrevious`
+ * es una proyección lineal de 1 paso - cuando los cierres recientes (sumPrevious) divergen
+ * mucho de `smaSlow` (rally o caída fuerte reciente, típico en nombres volátiles como MU),
+ * puede devolver un valor negativo o absurdamente alto. Las ramas EMA/MACD de
+ * `computeEstimatedEntryPrice` ya tenían este guard (`p > 0 && p < price*4`); esta función
+ * no lo tenía - se agrega acá, con el precio actual (último close) como fallback, igual
+ * que las otras ramas en `conditions.ts`.
  */
 export function estimateEntryPrice(closes: number[], fastPeriod: number, smaSlow: number | null): number | null {
   if (smaSlow === null || closes.length < fastPeriod) return null;
 
   const previousCloses = closes.slice(-fastPeriod, -1);
   const sumPrevious = previousCloses.reduce((acc, value) => acc + value, 0);
+  const estimated = fastPeriod * smaSlow - sumPrevious;
 
-  return fastPeriod * smaSlow - sumPrevious;
+  const currentPrice = closes[closes.length - 1];
+  if (estimated <= 0 || estimated > currentPrice * 4) {
+    console.warn(`[estimateEntryPrice] Valor fuera de rango (${estimated.toFixed(2)}) para fastPeriod=${fastPeriod}, smaSlow=${smaSlow.toFixed(2)}, price=${currentPrice.toFixed(2)} - usando price como fallback`);
+    return currentPrice;
+  }
+
+  return estimated;
 }
 
 /**

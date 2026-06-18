@@ -38,8 +38,13 @@ const detailContent = document.getElementById('detail-content');
 
 const positionsTableBody = document.querySelector('#positions-table tbody');
 const ordersTableBody = document.querySelector('#orders-table tbody');
+const pendingOrdersTableBody = document.querySelector('#pending-orders-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
 const tradeResult = document.getElementById('trade-result');
+const opsSyncBtn = document.getElementById('ops-sync-btn');
+const opsAccountPills = document.getElementById('ops-account-pills');
+const opsBanner = document.getElementById('ops-banner');
+const opsAlerts = document.getElementById('ops-alerts');
 
 const snapshotsTableBody = document.querySelector('#snapshots-table tbody');
 const refreshSnapshotsBtn = document.getElementById('refresh-snapshots');
@@ -63,6 +68,8 @@ const state = {
   selectedSymbol: null,
   filters: { estado: 'todos', tipo: 'todos', senal: 'todos', search: '' },
   chartToggles: { ma: true, bb: true, osc: true },
+  opsAccount: 'all',
+  exitPriceBySymbol: new Map(),
 };
 
 // ── Tabs ──
@@ -694,49 +701,255 @@ async function renderSymbolCharts(entries) {
   });
 }
 
-function renderPositionsTable(positions) {
-  positionsTableBody.innerHTML = '';
-  if (positions.length === 0) {
-    positionsTableBody.innerHTML = '<tr><td colspan="6" class="muted">Sin posiciones abiertas.</td></tr>';
+// ── Operaciones multi-cuenta ──
+const ACCOUNT_LABELS = { aptos: '✅ Aptos', observados: '🟡 Observados', bloqueados: '❌ Bloqueados' };
+
+function accountBadge(group) {
+  return `<span class="badge-account badge-account-${group}">${ACCOUNT_LABELS[group] ?? group}</span>`;
+}
+
+function selectedAccountGroups() {
+  return state.opsAccount === 'all' ? ['aptos', 'observados', 'bloqueados'] : [state.opsAccount];
+}
+
+function renderOperationsBanner(accounts) {
+  const groups = selectedAccountGroups();
+  const rows = groups.map((g) => accounts[g]?.accountState).filter(Boolean);
+
+  if (rows.length === 0) {
+    opsBanner.innerHTML = '<span class="muted">Sin datos de cuenta todavía - hacé clic en "Sincronizar ahora".</span>';
     return;
   }
 
-  positions.forEach((position) => {
+  const equity = rows.reduce((s, r) => s + Number(r.equity ?? 0), 0);
+  const cash = rows.reduce((s, r) => s + Number(r.cash ?? 0), 0);
+  const buyingPower = rows.reduce((s, r) => s + Number(r.buying_power ?? 0), 0);
+  const lastSyncs = groups.map((g) => accounts[g]?.accountState?.last_sync_at).filter(Boolean).map((d) => new Date(d));
+  const oldestSync = lastSyncs.length > 0 ? new Date(Math.min(...lastSyncs.map((d) => d.getTime()))) : null;
+  const nextInSeconds = oldestSync ? Math.max(0, 60 - Math.round((Date.now() - oldestSync.getTime()) / 1000)) : null;
+
+  opsBanner.innerHTML = `
+    <span><span class="stat-label">Equity</span>${fmtMoney(equity)}</span>
+    <span><span class="stat-label">Cash</span>${fmtMoney(cash)}</span>
+    <span><span class="stat-label">Buying power</span>${fmtMoney(buyingPower)}</span>
+    <span class="ops-sync-indicator">${oldestSync ? `Última sync: ${oldestSync.toLocaleTimeString()} · próxima en ${nextInSeconds}s` : 'Sin sincronizar todavía'}</span>
+  `;
+}
+
+function renderOperationsAlerts(discrepancies, staleOrders) {
+  const chips = [];
+  if (discrepancies.length > 0) {
+    chips.push(`<span class="alert-chip">⚠️ ${discrepancies.length} discrepancia(s) DB vs Alpaca (24h)</span>`);
+  }
+  if (staleOrders.length > 0) {
+    chips.push(`<span class="alert-chip alert-chip-warn">🐌 ${staleOrders.length} orden(es) huérfana(s) (>${staleOrders[0]?.timeoutMin ?? ''}min pendiente)</span>`);
+  }
+  opsAlerts.classList.toggle('hidden', chips.length === 0);
+  opsAlerts.innerHTML = chips.join('');
+}
+
+function renderOperationsPositions(accounts) {
+  positionsTableBody.innerHTML = '';
+  const groups = selectedAccountGroups();
+  const rows = [];
+  for (const g of groups) {
+    for (const p of accounts[g]?.positions ?? []) rows.push({ group: g, ...p });
+  }
+
+  if (rows.length === 0) {
+    positionsTableBody.innerHTML = '<tr><td colspan="9" class="muted">Sin posiciones abiertas.</td></tr>';
+    return;
+  }
+
+  rows.forEach((position) => {
+    const exit = state.exitPriceBySymbol.get(position.symbol);
+    const exitCell = exit && exit.price !== null
+      ? `<span title="${(exit.source ?? '').replace(/"/g, '&quot;')}">${fmtMoney(exit.price)}</span>`
+      : `<span class="muted" title="${exit?.reason === 'no_projectable' ? 'La condición de venta activa no tiene un nivel proyectable (ej. RSI)' : exit?.reason === 'insufficient_history' ? 'Histórico insuficiente para calcular indicadores' : 'Sin calcular todavía'}">—</span>`;
+    const sellDisabled = !exit || exit.price === null;
+
     const tr = document.createElement('tr');
     tr.innerHTML = `
+      <td>${accountBadge(position.group)}</td>
       <td>${position.symbol}</td>
       <td>${fmtNum(position.qty, 0)}</td>
-      <td>${fmtMoney(position.avgEntryPrice)}</td>
-      <td>${fmtMoney(position.currentPrice)}</td>
-      <td>${fmtMoney(position.marketValue)}</td>
-      <td class="${position.unrealizedPl >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtMoney(position.unrealizedPl)}</td>
+      <td>${fmtMoney(position.avg_entry_price ?? position.avgEntryPrice)}</td>
+      <td>${fmtMoney(position.current_price ?? position.currentPrice)}</td>
+      <td>${fmtMoney(position.market_value ?? position.marketValue)}</td>
+      <td class="${Number(position.unrealized_pl ?? position.unrealizedPl) >= 0 ? 'pl-positive' : 'pl-negative'}">${fmtMoney(position.unrealized_pl ?? position.unrealizedPl)}</td>
+      <td>${exitCell}</td>
+      <td><button class="btn-small" data-sell-symbol="${position.symbol}" ${sellDisabled ? 'disabled' : ''}>Vender al precio estimado</button></td>
     `;
     positionsTableBody.appendChild(tr);
   });
 }
 
-function renderOrdersTable(orders) {
-  ordersTableBody.innerHTML = '';
-  if (orders.length === 0) {
-    ordersTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin órdenes registradas.</td></tr>';
+function renderOperationsPendingOrders(accounts, staleIds) {
+  pendingOrdersTableBody.innerHTML = '';
+  const groups = selectedAccountGroups();
+  const rows = [];
+  for (const g of groups) {
+    for (const o of accounts[g]?.pendingOrders ?? []) rows.push({ group: g, ...o });
+  }
+
+  if (rows.length === 0) {
+    pendingOrdersTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin órdenes pendientes.</td></tr>';
     return;
   }
 
-  orders.forEach((order) => {
+  rows.forEach((order) => {
+    const isStale = staleIds.has(order.alpaca_order_id);
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${new Date(order.ts).toLocaleString()}</td>
+      <td>${accountBadge(order.group)}</td>
+      <td>${order.symbol}${isStale ? '<span class="badge-stale" title="Pendiente más del timeout configurado">huérfana</span>' : ''}</td>
+      <td>${order.side.toUpperCase()}</td>
+      <td>${fmtNum(order.qty, 0)}</td>
+      <td>${order.limit_price !== null ? fmtMoney(order.limit_price) : '—'}</td>
+      <td>${order.submitted_at ? new Date(order.submitted_at).toLocaleString() : '—'}</td>
+      <td>${order.status}</td>
+      <td><button class="btn-small" data-cancel-order="${order.alpaca_order_id}" data-cancel-group="${order.group}">Cancelar</button></td>
+    `;
+    pendingOrdersTableBody.appendChild(tr);
+  });
+}
+
+function renderOrdersTable(accounts) {
+  ordersTableBody.innerHTML = '';
+  const groups = selectedAccountGroups();
+  const rows = [];
+  for (const g of groups) {
+    for (const o of accounts[g]?.executedOrders ?? []) rows.push({ group: g, ...o });
+  }
+
+  if (rows.length === 0) {
+    ordersTableBody.innerHTML = '<tr><td colspan="7" class="muted">Sin órdenes ejecutadas todavía.</td></tr>';
+    return;
+  }
+
+  rows.forEach((order) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${accountBadge(order.group)}</td>
+      <td>${order.submitted_at ? new Date(order.submitted_at).toLocaleString() : '—'}</td>
       <td>${order.symbol}</td>
       <td>${order.side.toUpperCase()}</td>
       <td>${fmtNum(order.qty, 0)}</td>
-      <td>${order.orderType}</td>
-      <td>${order.takeProfitPrice !== null ? fmtMoney(order.takeProfitPrice) : '—'}</td>
-      <td>${order.stopLossPrice !== null ? fmtMoney(order.stopLossPrice) : '—'}</td>
+      <td>${order.order_type ?? '—'}</td>
       <td>${order.status}</td>
     `;
     ordersTableBody.appendChild(tr);
   });
 }
+
+async function loadOperations() {
+  try {
+    const accountParam = state.opsAccount;
+    const [opsRes, discRes, staleRes] = await Promise.all([
+      fetch(`/api/operations?account=${accountParam}`),
+      fetch(`/api/sync-discrepancies?account=${accountParam}`),
+      fetch(`/api/orders/stale?account=${accountParam}`),
+    ]);
+    const opsData = await opsRes.json();
+    const discData = await discRes.json();
+    const staleData = await staleRes.json();
+
+    if (!opsData.ok) {
+      opsBanner.innerHTML = `<span class="muted">Error: ${opsData.error}</span>`;
+      return;
+    }
+
+    const accounts = opsData.accounts;
+    const staleOrders = staleData.ok ? staleData.orders.map((o) => ({ ...o, timeoutMin: staleData.timeoutMin })) : [];
+    const staleIds = new Set(staleOrders.map((o) => o.alpaca_order_id));
+
+    renderOperationsBanner(accounts);
+    renderOperationsAlerts(discData.ok ? discData.discrepancies : [], staleOrders);
+    renderOperationsPendingOrders(accounts, staleIds);
+    renderOrdersTable(accounts);
+
+    // Precio estimado de salida: una sola vez por símbolo con posición abierta en el alcance actual.
+    const symbolsWithPosition = [...new Set(selectedAccountGroups().flatMap((g) => (accounts[g]?.positions ?? []).map((p) => p.symbol)))];
+    await Promise.all(symbolsWithPosition.map(async (symbol) => {
+      try {
+        const res = await fetch(`/api/positions/${symbol}/exit-price`);
+        const data = await res.json();
+        if (data.ok) state.exitPriceBySymbol.set(symbol, data);
+      } catch { /* best-effort */ }
+    }));
+
+    renderOperationsPositions(accounts);
+  } catch (error) {
+    opsBanner.innerHTML = `<span class="muted">Error: ${error}</span>`;
+  }
+}
+
+async function syncOperations() {
+  opsSyncBtn.disabled = true;
+  opsSyncBtn.textContent = '🔄 Sincronizando...';
+  try {
+    await fetch('/api/operations/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account: state.opsAccount }),
+    });
+    await loadOperations();
+  } catch (error) {
+    opsBanner.innerHTML = `<span class="muted">Error al sincronizar: ${error}</span>`;
+  } finally {
+    opsSyncBtn.disabled = false;
+    opsSyncBtn.textContent = '🔄 Sincronizar ahora';
+  }
+}
+
+async function cancelPendingOrder(orderId, group) {
+  if (!window.confirm(`¿Cancelar la orden pendiente ${orderId} (cuenta ${group})?`)) return;
+  try {
+    const res = await fetch(`/api/orders/${orderId}/cancel?account=${group}`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) window.alert(`Error: ${data.error}`);
+  } catch (error) {
+    window.alert(`Error: ${error}`);
+  } finally {
+    await loadOperations();
+  }
+}
+
+async function sellAtEstimate(symbol) {
+  const exit = state.exitPriceBySymbol.get(symbol);
+  if (!exit || exit.price === null) return;
+  if (!window.confirm(`¿Vender ${symbol} (cuenta ${exit.accountGroup}) a precio límite ${fmtMoney(exit.price)}?`)) return;
+
+  try {
+    const res = await fetch(`/api/positions/${symbol}/sell-at-estimate`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) window.alert(`Error: ${data.error}`);
+  } catch (error) {
+    window.alert(`Error: ${error}`);
+  } finally {
+    await loadOperations();
+  }
+}
+
+opsAccountPills.addEventListener('click', (event) => {
+  const btn = event.target.closest('.account-pill');
+  if (!btn) return;
+  state.opsAccount = btn.dataset.account;
+  opsAccountPills.querySelectorAll('.account-pill').forEach((p) => p.classList.toggle('active', p === btn));
+  loadOperations();
+});
+
+positionsTableBody.addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-sell-symbol]');
+  if (btn) sellAtEstimate(btn.dataset.sellSymbol);
+});
+
+pendingOrdersTableBody.addEventListener('click', (event) => {
+  const btn = event.target.closest('[data-cancel-order]');
+  if (btn) cancelPendingOrder(btn.dataset.cancelOrder, btn.dataset.cancelGroup);
+});
+
+opsSyncBtn.addEventListener('click', syncOperations);
 
 function renderBacktestingSummary(run) {
   if (!run) {
@@ -1201,7 +1414,7 @@ async function loadSymbolReports() {
     const backtestingData = await backtestingRes.json();
     const conditionsData = await conditionsRes.json();
 
-    const { account, positions, signals, hybridSignals, parallelPositions, orders, openOrdersCount } = statusData;
+    const { account, positions, signals, hybridSignals, parallelPositions, openOrdersCount } = statusData;
 
     renderSidebarAccount(account, openOrdersCount);
     renderSidebarPositions(positions);
@@ -1264,8 +1477,7 @@ async function loadSymbolReports() {
     renderConditionsTable();
     if (state.selectedSymbol) renderDetail();
 
-    renderPositionsTable(positions);
-    renderOrdersTable(orders);
+    await loadOperations();
   } catch (error) {
     sidebarAccount.textContent = `Error: ${error}`;
   }

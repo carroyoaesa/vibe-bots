@@ -148,18 +148,45 @@
       <div class="tab-panel" id="tab-operaciones">
         <div class="section-header">
           <h2>Operaciones</h2>
-          <button id="run-trade">🤖 Ejecutar ciclo de trading</button>
+          <div class="section-actions">
+            <button id="run-trade">🤖 Ejecutar ciclo de trading</button>
+            <button id="ops-sync-btn">🔄 Sincronizar ahora</button>
+          </div>
         </div>
         <p class="muted">
-          Puede abrir o cerrar posiciones reales (dinero simulado) en la cuenta <strong>paper</strong> de Alpaca,
+          Puede abrir o cerrar posiciones reales (dinero simulado) en cuentas <strong>paper</strong> de Alpaca,
           salvo que el interruptor "Órdenes a Alpaca" (header) esté desactivado.
         </p>
+
+        <div id="ops-alerts" class="ops-alerts hidden"></div>
+
+        <div class="account-pills" id="ops-account-pills">
+          <button class="account-pill active" data-account="all">Todas</button>
+          <button class="account-pill" data-account="aptos">✅ Aptos</button>
+          <button class="account-pill" data-account="observados">🟡 Observados</button>
+          <button class="account-pill" data-account="bloqueados">❌ Bloqueados</button>
+        </div>
+
+        <div id="ops-banner" class="ops-banner"></div>
 
         <h3>Posiciones abiertas</h3>
         <div class="table-wrap">
           <table id="positions-table">
             <thead>
-              <tr><th>Símbolo</th><th>Cantidad</th><th>Precio entrada</th><th>Precio actual</th><th>Valor</th><th>P/L no realizado</th></tr>
+              <tr>
+                <th>Cuenta</th><th>Símbolo</th><th>Cantidad</th><th>Precio entrada</th><th>Precio actual</th><th>Valor</th><th>P/L no realizado</th>
+                <th>Precio salida est.</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h3>Órdenes pendientes</h3>
+        <div class="table-wrap">
+          <table id="pending-orders-table">
+            <thead>
+              <tr><th>Cuenta</th><th>Símbolo</th><th>Lado</th><th>Cantidad</th><th>Límite</th><th>Enviada</th><th>Estado</th><th></th></tr>
             </thead>
             <tbody></tbody>
           </table>
@@ -169,7 +196,7 @@
         <div class="table-wrap">
           <table id="orders-table">
             <thead>
-              <tr><th>Fecha</th><th>Símbolo</th><th>Lado</th><th>Cantidad</th><th>Tipo</th><th>TP</th><th>SL</th><th>Estado</th></tr>
+              <tr><th>Cuenta</th><th>Fecha</th><th>Símbolo</th><th>Lado</th><th>Cantidad</th><th>Tipo</th><th>Estado</th></tr>
             </thead>
             <tbody></tbody>
           </table>

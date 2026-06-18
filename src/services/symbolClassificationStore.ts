@@ -1,9 +1,26 @@
 import { Pool } from 'pg';
 import { WATCHLIST } from '../watchlist';
+import { AccountGroup } from './alpaca';
 
 export type SymbolClassificationStatus = 'apto' | 'observar' | 'bloqueado';
 
 export const SYMBOL_CLASSIFICATION_STATUSES: SymbolClassificationStatus[] = ['apto', 'observar', 'bloqueado'];
+
+/**
+ * Mapeo 1:1 clasificación -> grupo de cuenta Alpaca (`services/alpaca.ts#AccountGroup`).
+ * Usado para ETIQUETAR `trading_signals`/`trading_orders.account_group` con el grupo que
+ * "le correspondería" al símbolo según su clasificación ACTUAL - no implica ruteo real de
+ * la orden a esa cuenta (eso sigue pendiente, ver entregable de esta fase).
+ */
+const CLASSIFICATION_TO_ACCOUNT_GROUP: Record<SymbolClassificationStatus, AccountGroup> = {
+  apto: 'aptos',
+  observar: 'observados',
+  bloqueado: 'bloqueados',
+};
+
+export function classificationToAccountGroup(status: SymbolClassificationStatus): AccountGroup {
+  return CLASSIFICATION_TO_ACCOUNT_GROUP[status];
+}
 
 // Defaults iniciales (2026-06-18), decididos manualmente sobre el watchlist de 27 símbolos
 // vigente en ese momento. Solo se usan para sembrar la tabla si está vacía - una vez que
