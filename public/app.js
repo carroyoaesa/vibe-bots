@@ -62,6 +62,7 @@ const state = {
   positions: [],
   selectedSymbol: null,
   filters: { estado: 'todos', tipo: 'todos', senal: 'todos', search: '' },
+  chartToggles: { ma: true, bb: true, osc: true },
 };
 
 // ── Tabs ──
@@ -582,7 +583,13 @@ async function renderSymbolCharts(entries) {
       },
     ];
 
+    // Toggle de overlays (Fase 3): "Bollinger" controla las bandas (key bb*), "Medias
+    // móviles" el resto de los overlays de precio (SMA/EMA/canal Donchian).
     (chartConfig.price ?? []).forEach((overlay) => {
+      const isBollinger = overlay.key.startsWith('bb');
+      if (isBollinger && !state.chartToggles.bb) return;
+      if (!isBollinger && !state.chartToggles.ma) return;
+
       datasets.push({
         label: overlay.label,
         data: result.points.map((point) => point[overlay.key]),
@@ -622,7 +629,7 @@ async function renderSymbolCharts(entries) {
       });
     }
 
-    const oscillator = chartConfig.oscillator;
+    const oscillator = state.chartToggles.osc ? chartConfig.oscillator : undefined;
     if (oscillator) {
       oscillator.series.forEach((s) => {
         datasets.push({
@@ -968,7 +975,10 @@ function renderResumenTable() {
   resumenTableBody.innerHTML = '';
 
   if (sorted.length === 0) {
-    resumenTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin símbolos para los filtros aplicados.</td></tr>';
+    const hasActiveFilters = Object.values(state.filters).some((value) => value && value !== 'todos');
+    resumenTableBody.innerHTML = hasActiveFilters
+      ? '<tr><td colspan="8" class="muted">Sin símbolos para los filtros aplicados. <a href="#" id="clear-filters-link">Limpiar filtros</a></td></tr>'
+      : '<tr><td colspan="8" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
   } else {
     sorted.forEach((row) => {
       const tr = document.createElement('tr');
@@ -1006,6 +1016,19 @@ function renderResumenTable() {
   }
 
   updateSortIndicators('resumen-table', resumenSortState);
+
+  const clearFiltersLink = document.getElementById('clear-filters-link');
+  if (clearFiltersLink) {
+    clearFiltersLink.addEventListener('click', (event) => {
+      event.preventDefault();
+      state.filters = { estado: 'todos', tipo: 'todos', senal: 'todos', search: '' };
+      filterEstado.value = 'todos';
+      filterTipo.value = 'todos';
+      filterSenal.value = 'todos';
+      filterSearch.value = '';
+      renderResumenTable();
+    });
+  }
 }
 
 resumenTableBody.addEventListener('change', (event) => {
@@ -1069,7 +1092,12 @@ function renderDetail() {
       <div class="symbol-stats-grid">${renderSymbolStats(signal)}</div>
       <p class="muted symbol-reason">Motivo: ${signal.reason}</p>
       <div class="symbol-position">${signal.positionLine ?? renderPositionLine(position)}</div>
-      <div class="chart-canvas-wrap"><canvas id="detail-chart-canvas"></canvas></div>
+      <div class="chart-toggles">
+        <label><input type="checkbox" id="toggle-ma" ${state.chartToggles.ma ? 'checked' : ''}> Medias móviles</label>
+        <label><input type="checkbox" id="toggle-bb" ${state.chartToggles.bb ? 'checked' : ''}> Bollinger</label>
+        <label><input type="checkbox" id="toggle-osc" ${state.chartToggles.osc ? 'checked' : ''}> Oscilador</label>
+      </div>
+      <div class="chart-canvas-wrap detail-chart-canvas-wrap"><canvas id="detail-chart-canvas"></canvas></div>
       <p class="muted chart-no-data hidden" id="detail-chart-empty">Sin datos históricos todavía. Ejecutá la ingesta.</p>
       <div class="symbol-subsection">
         <h5>Evaluación de IA (Claude)</h5>
@@ -1091,12 +1119,21 @@ function renderDetail() {
     updateClassification(symbol, event.target.value, event.target);
   });
 
-  renderSymbolCharts([{
+  const redrawChart = () => renderSymbolCharts([{
     signal,
     cardKey: symbol,
     canvas: document.getElementById('detail-chart-canvas'),
     noDataMsg: document.getElementById('detail-chart-empty'),
   }]);
+
+  [['toggle-ma', 'ma'], ['toggle-bb', 'bb'], ['toggle-osc', 'osc']].forEach(([id, key]) => {
+    document.getElementById(id).addEventListener('change', (event) => {
+      state.chartToggles[key] = event.target.checked;
+      redrawChart();
+    });
+  });
+
+  redrawChart();
 }
 
 // ── Sidebar (cuenta / posiciones) ──
