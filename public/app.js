@@ -3,9 +3,14 @@ const healthUpdated = document.getElementById('health-updated');
 const refreshHealthBtn = document.getElementById('refresh-health');
 const runIngestBtn = document.getElementById('run-ingest');
 const ingestResult = document.getElementById('ingest-result');
+const statusBadge = document.getElementById('status-badge');
 
 const tradingToggleStatus = document.getElementById('trading-toggle-status');
 const tradingToggleBtn = document.getElementById('trading-toggle-btn');
+
+const sidebarHealth = document.getElementById('sidebar-health');
+const sidebarAccount = document.getElementById('sidebar-account');
+const sidebarPositions = document.getElementById('sidebar-positions');
 
 const riskPresetSelect = document.getElementById('risk-preset');
 const riskPositionSizeInput = document.getElementById('risk-position-size');
@@ -15,20 +20,26 @@ const saveSettingsBtn = document.getElementById('save-settings');
 const settingsResult = document.getElementById('settings-result');
 const settingsUpdated = document.getElementById('settings-updated');
 
-const tradingAccount = document.getElementById('trading-account');
 const backtestingPeriod = document.getElementById('backtesting-period');
 const backtestingPortfolio = document.getElementById('backtesting-portfolio');
-const symbolReportsEtf = document.getElementById('symbol-reports-etf');
-const symbolReportsStock = document.getElementById('symbol-reports-stock');
-const signalsSummaryTableBody = document.querySelector('#signals-summary-table tbody');
 const conditionsTableBody = document.querySelector('#conditions-table tbody');
 const conditionsTableNote = document.getElementById('conditions-table-note');
+const runBacktestBtn = document.getElementById('run-backtest');
+const backtestingResult = document.getElementById('backtesting-result');
+
+const resumenTableBody = document.querySelector('#resumen-table tbody');
+const resumenCount = document.getElementById('resumen-count');
+const filterEstado = document.getElementById('f-estado');
+const filterTipo = document.getElementById('f-tipo');
+const filterSenal = document.getElementById('f-senal');
+const filterSearch = document.getElementById('f-search');
+
+const detailContent = document.getElementById('detail-content');
+
 const positionsTableBody = document.querySelector('#positions-table tbody');
 const ordersTableBody = document.querySelector('#orders-table tbody');
 const runTradeBtn = document.getElementById('run-trade');
 const tradeResult = document.getElementById('trade-result');
-const runBacktestBtn = document.getElementById('run-backtest');
-const backtestingResult = document.getElementById('backtesting-result');
 
 const snapshotsTableBody = document.querySelector('#snapshots-table tbody');
 const refreshSnapshotsBtn = document.getElementById('refresh-snapshots');
@@ -39,8 +50,30 @@ let tradingEnabled = true;
 
 // Refleja TIER1_SYMBOLS de strategy/hybridConfig.ts — señal "main" calculada sobre velas 1H.
 const HYBRID_TIER1_SYMBOLS = ['SPY', 'XLU'];
-const HYBRID_TIER2_SYMBOLS = ['MS', 'QQQM'];
-const HYBRID_SHADOW_SYMBOLS = ['SCHD'];
+
+// Estado central de la pestaña Resumen/Detalle (Fase 2 - UI con tabs).
+const state = {
+  classifications: {},
+  mainSignals: [],
+  hybridSignals: [],
+  assessmentsBySymbol: new Map(),
+  backtestSummaryBySymbol: new Map(),
+  positionsBySymbol: new Map(),
+  positions: [],
+  selectedSymbol: null,
+  filters: { estado: 'todos', tipo: 'todos', senal: 'todos', search: '' },
+  chartToggles: { ma: true, bb: true, osc: true },
+};
+
+// ── Tabs ──
+function activateTab(tabKey) {
+  document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === tabKey));
+  document.querySelectorAll('.tab-panel').forEach((panel) => panel.classList.toggle('active', panel.id === `tab-${tabKey}`));
+}
+
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+});
 
 function renderHealth(data) {
   healthGrid.innerHTML = '';
@@ -77,6 +110,21 @@ function renderHealth(data) {
   });
 
   healthUpdated.textContent = `Última actualización: ${new Date(data.generatedAt).toLocaleTimeString()}`;
+  renderSidebarHealth(data);
+}
+
+function renderSidebarHealth(data) {
+  const total = data.checks.length;
+  const failing = data.checks.filter((check) => !check.ok).map((check) => check.name);
+  const okCount = total - failing.length;
+
+  sidebarHealth.innerHTML = failing.length === 0
+    ? `<span class="pl-positive">✅ ${okCount}/${total} OK</span>`
+    : `<span class="pl-negative">⚠️ ${okCount}/${total} OK</span><br><span class="muted">Fallan: ${failing.join(', ')}</span>`;
+
+  statusBadge.textContent = failing.length === 0 ? '✅ Todo OK' : `⚠️ ${failing.length} con error`;
+  statusBadge.classList.toggle('tag-ok', failing.length === 0);
+  statusBadge.classList.toggle('tag-error', failing.length > 0);
 }
 
 async function loadHealth() {
@@ -237,20 +285,6 @@ function recommendationClass(recommendation) {
   return 'signal-hold';
 }
 
-/**
- * Puntaje de "qué tan conveniente es comprar ahora": prioriza señal BUY/HOLD/SELL,
- * y dentro de cada una favorece momentum positivo, RSI cercano a neutral (no sobrecomprado)
- * y tendencia alcista (SMA10 por encima de SMA30).
- */
-function attractivenessScore(signal) {
-  const signalScore = { BUY: 2, HOLD: 1, SELL: 0 }[signal.signal] ?? 1;
-  const momentumScore = signal.momentum !== null ? signal.momentum / 10 : 0;
-  const rsiScore = signal.rsi !== null ? (50 - Math.abs(signal.rsi - 50)) / 50 : 0;
-  const trendScore = signal.smaFast !== null && signal.smaSlow ? (signal.smaFast - signal.smaSlow) / signal.smaSlow : 0;
-
-  return signalScore * 10 + momentumScore + rsiScore + trendScore * 10;
-}
-
 function renderSymbolStats(signal) {
   const stat = (label, value) => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>`;
 
@@ -317,96 +351,9 @@ function renderBacktestBlock(summary) {
   `;
 }
 
-function renderSymbolCard(container, index, signal, assessment, backtestSummary, position) {
-  const symbol = signal.symbol;
-  const cardKey = signal.cardKey ?? symbol;
-  let card = document.getElementById(`symbol-card-${cardKey}`);
-
-  if (!card) {
-    card = document.createElement('div');
-    card.className = 'symbol-report-card';
-    card.id = `symbol-card-${cardKey}`;
-    card.innerHTML = `
-      <div class="symbol-report-header">
-        <h4>${symbol}${signal.cardBadge ? ` <span class="muted" style="font-size:0.8em">${signal.cardBadge}</span>` : ''}</h4>
-        <span class="signal-badge"></span>
-      </div>
-      <div class="symbol-stats-grid"></div>
-      <p class="muted symbol-reason"></p>
-      <div class="symbol-position"></div>
-      <div class="chart-canvas-wrap">
-        <canvas></canvas>
-      </div>
-      <p class="muted chart-no-data hidden">Sin datos históricos todavía. Ejecutá la ingesta.</p>
-      ${signal.hideAssessment ? '' : `<div class="symbol-subsection">
-        <h5>Evaluación de IA (Claude)</h5>
-        <div class="symbol-assessment"></div>
-      </div>`}
-      <div class="symbol-subsection">
-        <h5>Backtest</h5>
-        <div class="symbol-backtest"></div>
-      </div>
-    `;
-    container.appendChild(card);
-  }
-
-  // Mantener el orden según el ranking de atractivo.
-  if (container.children[index] !== card) {
-    container.insertBefore(card, container.children[index] ?? null);
-  }
-
-  const badge = card.querySelector('.signal-badge');
-  badge.className = `signal-badge ${signalClass(signal.signal)}`;
-  badge.textContent = signal.signal;
-
-  card.querySelector('.symbol-stats-grid').innerHTML = renderSymbolStats(signal);
-  card.querySelector('.symbol-reason').textContent = `Motivo: ${signal.reason}`;
-  card.querySelector('.symbol-position').innerHTML = signal.positionLine ?? renderPositionLine(position);
-  if (!signal.hideAssessment) {
-    card.querySelector('.symbol-assessment').innerHTML = renderAssessmentBlock(assessment);
-  }
-  card.querySelector('.symbol-backtest').innerHTML = renderBacktestBlock(backtestSummary);
-
-  return {
-    signal,
-    cardKey,
-    canvas: card.querySelector('canvas'),
-    noDataMsg: card.querySelector('.chart-no-data'),
-  };
-}
-
-function renderSymbolReportsGroup(container, signals, assessmentsBySymbol, backtestSummaryBySymbol, positionsBySymbol) {
-  if (signals.length === 0) {
-    container.innerHTML = '<p class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</p>';
-    return [];
-  }
-
-  const seenCardKeys = new Set(signals.map((signal) => signal.cardKey ?? signal.symbol));
-  container.querySelectorAll('.symbol-report-card').forEach((card) => {
-    const cardKey = card.id.replace('symbol-card-', '');
-    if (!seenCardKeys.has(cardKey)) {
-      if (chartInstances[cardKey]) {
-        chartInstances[cardKey].destroy();
-        delete chartInstances[cardKey];
-      }
-      card.remove();
-    }
-  });
-
-  return signals.map((signal, index) => renderSymbolCard(
-    container,
-    index,
-    signal,
-    assessmentsBySymbol.get(signal.symbol),
-    backtestSummaryBySymbol.get(signal.cardKey ?? signal.symbol),
-    positionsBySymbol.get(signal.symbol)
-  ));
-}
-
 /**
- * Color representativo por condición, usado como badge en "Condición
- * activa"/"Condición" (tablas de resumen y de backtest) para identificar
- * de un vistazo qué símbolos comparten la misma condición.
+ * Color representativo por condición, usado como badge en la tabla de backtest
+ * para identificar de un vistazo qué símbolos comparten la misma condición.
  */
 const CONDITION_COLORS = {
   sma_cross_10_30: '#2ecc71',
@@ -431,10 +378,10 @@ function conditionBadge(conditionId, label) {
 }
 
 /**
- * Overlays de gráfico por condición activa (Fase 6.1), usando los campos de
- * `ChartPoint` (`strategy/chart.ts`). `price`: líneas en el eje de precio (`y`),
- * mismas unidades que "Precio". `oscillator`: panel secundario (`y1`), con
- * `levels` (umbrales de la condición) dibujados como líneas punteadas grises.
+ * Overlays de gráfico por condición activa, usando los campos de `ChartPoint`
+ * (`strategy/chart.ts`). `price`: líneas en el eje de precio (`y`), mismas unidades
+ * que "Precio". `oscillator`: panel secundario (`y1`), con `levels` (umbrales de la
+ * condición) dibujados como líneas punteadas grises.
  */
 const CONDITION_CHART_CONFIG = {
   sma_cross_10_30: {
@@ -537,11 +484,9 @@ const CONDITION_CHART_CONFIG = {
 
 /**
  * Extrae los ids de condición conocidos (claves de `CONDITION_CHART_CONFIG`) presentes en
- * una expresión de condición (Fase 8: puede ser un id simple - Fase 7 - o una combinación
- * de 2-3 con AND/OR, p.ej. `"OR(bollinger_reversion+stochastic_cross+trend_pullback_sma50)"`
- * o `"(sma_cross_10_30|williams_r_reversal)&bollinger_breakout"`). No necesita parsear la
- * lógica AND/OR - alcanza con tokenizar identificadores y quedarse con los que matchean el
- * catálogo; "AND"/"OR" nunca matchean ninguna clave, así que se descartan solos.
+ * una expresión de condición (id simple o combinación AND/OR de 2-3). No necesita parsear
+ * la lógica AND/OR - alcanza con tokenizar identificadores y quedarse con los que matchean
+ * el catálogo; "AND"/"OR" nunca matchean ninguna clave, así que se descartan solos.
  */
 function extractConditionIds(expr) {
   const tokens = String(expr ?? '').match(/[A-Za-z0-9_]+/g) ?? [];
@@ -557,12 +502,10 @@ function extractConditionIds(expr) {
 }
 
 /**
- * Combina los overlays de gráfico (Fase 6.1) de TODAS las condiciones hoja presentes en la
- * expresión de compra y la de venta (Fase 8 - antes Fase 7 combinaba como máximo 2 ids
- * simples): los overlays de precio (`price`) se concatenan (sin duplicar por `key`); el
- * panel oscilador (`oscillator`) se toma de la primera condición (en orden compra, luego
- * venta) que defina uno. Si ningún id de la expresión está en el catálogo (no debería
- * pasar con condiciones válidas), no rompe - simplemente no hay overlays para ese gráfico.
+ * Combina los overlays de gráfico de TODAS las condiciones hoja presentes en la expresión
+ * de compra y la de venta: los overlays de precio (`price`) se concatenan (sin duplicar por
+ * `key`); el panel oscilador (`oscillator`) se toma de la primera condición (en orden compra,
+ * luego venta) que defina uno.
  */
 function mergeConditionChartConfig(buyConditionId, sellConditionId) {
   const ids = [...extractConditionIds(buyConditionId), ...extractConditionIds(sellConditionId)];
@@ -609,14 +552,16 @@ async function renderSymbolCharts(entries) {
       delete chartInstances[instanceKey];
     }
 
+    if (!canvas) return;
+
     if (!result.ok || !result.points || result.points.length === 0) {
       canvas.classList.add('hidden');
-      noDataMsg.classList.remove('hidden');
+      if (noDataMsg) noDataMsg.classList.remove('hidden');
       return;
     }
 
     canvas.classList.remove('hidden');
-    noDataMsg.classList.add('hidden');
+    if (noDataMsg) noDataMsg.classList.add('hidden');
 
     const is1H = result.timeframe === '1Hour';
     const labels = result.points.map((point) =>
@@ -638,7 +583,13 @@ async function renderSymbolCharts(entries) {
       },
     ];
 
+    // Toggle de overlays (Fase 3): "Bollinger" controla las bandas (key bb*), "Medias
+    // móviles" el resto de los overlays de precio (SMA/EMA/canal Donchian).
     (chartConfig.price ?? []).forEach((overlay) => {
+      const isBollinger = overlay.key.startsWith('bb');
+      if (isBollinger && !state.chartToggles.bb) return;
+      if (!isBollinger && !state.chartToggles.ma) return;
+
       datasets.push({
         label: overlay.label,
         data: result.points.map((point) => point[overlay.key]),
@@ -678,7 +629,7 @@ async function renderSymbolCharts(entries) {
       });
     }
 
-    const oscillator = chartConfig.oscillator;
+    const oscillator = state.chartToggles.osc ? chartConfig.oscillator : undefined;
     if (oscillator) {
       oscillator.series.forEach((s) => {
         datasets.push({
@@ -787,11 +738,6 @@ function renderOrdersTable(orders) {
   });
 }
 
-function renderParallelPositionLine(pos) {
-  if (!pos) return '<p class="muted">Sin posición paralela abierta.</p>';
-  return `<p>Posición paralela · ${fmtNum(pos.qty, 0)} acc. · entrada ${fmtMoney(pos.entryPrice)} · abierta ${new Date(pos.openedAt).toLocaleString()}</p>`;
-}
-
 function renderBacktestingSummary(run) {
   if (!run) {
     backtestingPeriod.textContent = '';
@@ -847,11 +793,10 @@ const COND_SHORT = {
 };
 
 /**
- * Forma corta para una condición o expresión de condición (Fase 8: puede ser un id
- * simple - Fase 7, lookup directo - o una combinación de 2-3 con AND/OR). Para
- * expresiones compuestas, sustituye cada id hoja conocido por su forma corta y
- * conserva AND/OR/&/|/paréntesis tal cual, para no volcar la expresión cruda completa
- * (puede tener 60+ caracteres) en un badge angosto.
+ * Forma corta para una condición o expresión de condición (puede ser un id simple
+ * o una combinación de 2-3 con AND/OR). Para expresiones compuestas, sustituye cada
+ * id hoja conocido por su forma corta y conserva AND/OR/&/|/paréntesis tal cual, para
+ * no volcar la expresión cruda completa (puede tener 60+ caracteres) en un badge angosto.
  */
 function condShort(id) {
   if (!id) return id;
@@ -870,17 +815,6 @@ function aiRecClass(rec) {
   return 'signal-hold';
 }
 
-const SIGNALS_TABLE_COLUMNS = [
-  { key: 'symbol',     type: 'string', getValue: (s) => s.symbol },
-  { key: 'type',       type: 'string', getValue: (s) => s.type },
-  { key: 'system',     type: 'string', getValue: (s) => s.systemLabel ?? '' },
-  { key: 'signal',     type: 'string', getValue: (s) => s.signal },
-  { key: 'aiRec',      type: 'string', getValue: (s) => s.aiRecommendation ?? '' },
-  { key: 'conditions', type: 'string', getValue: (s) => (s.buyConditionId ?? '') + '→' + (s.sellConditionId ?? '') },
-  { key: 'entryPrice', type: 'number', getValue: (s) => s.estimatedEntryPrice ?? null },
-  { key: 'reason',     type: 'string', getValue: (s) => s.simplifiedReason ?? s.reason ?? '' },
-];
-
 const CONDITIONS_TABLE_COLUMNS = [
   { key: 'symbol', type: 'string', getValue: (c) => c.symbol },
   { key: 'system', type: 'string', getValue: (c) => c.systemLabel ?? '' },
@@ -895,11 +829,20 @@ const CONDITIONS_TABLE_COLUMNS = [
   { key: 'updatedAt', type: 'number', getValue: (c) => (c.updatedAt ? new Date(c.updatedAt).getTime() : null) },
 ];
 
-// Orden inicial: "Resumen de señales" agrupado por Condición de compra (a-z).
-const signalsSortState = { key: 'buyCondition', direction: 'asc' };
-const conditionsSortState = { key: null, direction: 'asc' };
+const RESUMEN_TABLE_COLUMNS = [
+  { key: 'symbol', type: 'string', getValue: (r) => r.symbol },
+  { key: 'type', type: 'string', getValue: (r) => r.type },
+  { key: 'estado', type: 'string', getValue: (r) => r.classification },
+  { key: 'bloqueo', type: 'string', getValue: (r) => (r.classification === 'bloqueado' ? '1' : '0') },
+  { key: 'signal', type: 'string', getValue: (r) => r.signal },
+  { key: 'aiRec', type: 'string', getValue: (r) => r.aiRecommendation ?? '' },
+  { key: 'entryPrice', type: 'number', getValue: (r) => r.estimatedEntryPrice ?? null },
+  { key: 'conditions', type: 'string', getValue: (r) => (r.buyConditionId ?? '') + '→' + (r.sellConditionId ?? '') },
+];
 
-let latestSignals = [];
+const conditionsSortState = { key: null, direction: 'asc' };
+const resumenSortState = { key: 'symbol', direction: 'asc' };
+
 let latestConditions = [];
 
 function compareValues(va, vb, type, direction) {
@@ -954,49 +897,262 @@ function setupSortableTable(tableId, sortState, onChange) {
   });
 }
 
-function renderSignalsSummaryTable() {
-  signalsSummaryTableBody.innerHTML = '';
-  if (latestSignals.length === 0) {
-    signalsSummaryTableBody.innerHTML = '<tr><td colspan="8" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+// ── Clasificación manual por símbolo (apto/observar/bloqueado) ──
+
+function renderStatusSelect(symbol, status) {
+  const opt = (value, label) => `<option value="${value}" ${status === value ? 'selected' : ''}>${label}</option>`;
+  return `<select class="status-select status-${status}" data-symbol="${symbol}">`
+    + opt('apto', '✅ Apto') + opt('observar', '🟡 Observar') + opt('bloqueado', '❌ Bloqueado')
+    + `</select>`;
+}
+
+async function updateClassification(symbol, status, selectEl) {
+  const previous = state.classifications[symbol] ?? 'apto';
+  if (selectEl) selectEl.disabled = true;
+  try {
+    const res = await fetch(`/api/symbol-classifications/${symbol}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      window.alert(`Error: ${data.error}`);
+      if (selectEl) selectEl.value = previous;
+      return;
+    }
+    state.classifications[symbol] = status;
+    renderResumenTable();
+    if (state.selectedSymbol === symbol) renderDetail();
+  } catch (error) {
+    window.alert(`Error: ${error}`);
+    if (selectEl) selectEl.value = previous;
+  } finally {
+    if (selectEl) selectEl.disabled = false;
+  }
+}
+
+async function loadClassifications() {
+  try {
+    const res = await fetch('/api/symbol-classifications');
+    const data = await res.json();
+    state.classifications = data;
+    renderResumenTable();
+    if (state.selectedSymbol) renderDetail();
+  } catch (error) {
+    console.error('Error al cargar clasificaciones:', error);
+  }
+}
+
+// ── Pestaña Resumen ──
+
+function getResumenRows() {
+  return state.mainSignals.map((signal) => ({
+    ...signal,
+    classification: state.classifications[signal.symbol] ?? 'apto',
+  }));
+}
+
+function applyResumenFilters(rows) {
+  const { estado, tipo, senal, search } = state.filters;
+  const query = search.trim().toUpperCase();
+
+  return rows.filter((row) => {
+    if (estado !== 'todos' && row.classification !== estado) return false;
+    if (tipo !== 'todos' && row.type !== tipo) return false;
+    if (senal !== 'todos' && row.signal !== senal) return false;
+    if (query && !row.symbol.includes(query)) return false;
+    return true;
+  });
+}
+
+function renderResumenTable() {
+  const allRows = getResumenRows();
+  const filtered = applyResumenFilters(allRows);
+  const sorted = sortRows(filtered, RESUMEN_TABLE_COLUMNS, resumenSortState);
+
+  resumenCount.textContent = `${sorted.length} de ${allRows.length} símbolos`;
+  resumenTableBody.innerHTML = '';
+
+  if (sorted.length === 0) {
+    const hasActiveFilters = Object.values(state.filters).some((value) => value && value !== 'todos');
+    resumenTableBody.innerHTML = hasActiveFilters
+      ? '<tr><td colspan="8" class="muted">Sin símbolos para los filtros aplicados. <a href="#" id="clear-filters-link">Limpiar filtros</a></td></tr>'
+      : '<tr><td colspan="8" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
   } else {
-    const sorted = sortRows(latestSignals, SIGNALS_TABLE_COLUMNS, signalsSortState);
-    sorted.forEach((signal) => {
-      const entry = signal.estimatedEntryPrice != null ? fmtMoney(signal.estimatedEntryPrice) : '—';
+    sorted.forEach((row) => {
+      const tr = document.createElement('tr');
+      tr.className = `row-${row.classification} clickable-row`;
+      tr.dataset.symbol = row.symbol;
 
-      // Condiciones combinadas: "BB Rev. → SMA10/30" (o solo "BB Rev." si son iguales).
-      const buyShort = condShort(signal.buyConditionId);
-      const sellShort = condShort(signal.sellConditionId);
-      const condCell = signal.buyConditionId === signal.sellConditionId
-        ? `<span class="cond-badge" title="${signal.buyConditionLabel ?? ''}">${buyShort}</span>`
-        : `<span class="cond-badge" title="Compra: ${signal.buyConditionLabel ?? ''}">${buyShort}</span>`
+      const buyShort = condShort(row.buyConditionId);
+      const sellShort = condShort(row.sellConditionId);
+      const condCell = row.buyConditionId === row.sellConditionId
+        ? `<span class="cond-badge" title="${row.buyConditionLabel ?? ''}">${buyShort}</span>`
+        : `<span class="cond-badge" title="Compra: ${row.buyConditionLabel ?? ''}">${buyShort}</span>`
           + `<span class="cond-arrow">→</span>`
-          + `<span class="cond-badge" title="Venta: ${signal.sellConditionLabel ?? ''}">${sellShort}</span>`;
+          + `<span class="cond-badge" title="Venta: ${row.sellConditionLabel ?? ''}">${sellShort}</span>`;
 
-      // Evaluación de IA: muestra recomendación + confianza (si existe).
-      const rec = signal.aiRecommendation;
-      const conf = signal.aiConfidence != null ? ` ${Math.round(signal.aiConfidence * 100)}%` : '';
+      const rec = row.aiRecommendation;
+      const conf = row.aiConfidence != null ? ` ${Math.round(row.aiConfidence * 100)}%` : '';
       const aiCell = rec
-        ? `<span class="${aiRecClass(rec)}" title="${signal.aiRationale ?? ''}">${rec}${conf}</span>`
+        ? `<span class="${aiRecClass(rec)}" title="${row.aiRationale ?? ''}">${rec}${conf}</span>`
         : '<span class="muted">—</span>';
 
-      // Motivo: razón simplificada de Claude; fallback al reason técnico.
-      const motivo = signal.simplifiedReason || signal.reason || '';
+      const entry = row.estimatedEntryPrice != null ? fmtMoney(row.estimatedEntryPrice) : '—';
 
-      const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${signal.symbol}</td>
-        <td>${signal.type}</td>
-        <td class="muted">${signal.systemLabel ?? ''}</td>
-        <td><span class="${signalClass(signal.signal)}">${signal.signal}</span></td>
+        <td><strong>${row.symbol}</strong></td>
+        <td class="muted">${row.type === 'ETF' ? 'ETF' : 'Acción'}</td>
+        <td>${renderStatusSelect(row.symbol, row.classification)}</td>
+        <td>${row.classification === 'bloqueado' ? '<span class="badge-bloqueado">🚫 Bloqueado</span>' : '<span class="muted">—</span>'}</td>
+        <td><span class="${signalClass(row.signal)}">${row.signal}</span></td>
         <td class="ai-rec-cell">${aiCell}</td>
-        <td class="cond-cell">${condCell}</td>
         <td class="price-cell">${entry}</td>
-        <td class="muted reason-cell">${motivo}</td>
+        <td class="cond-cell">${condCell}</td>
       `;
-      signalsSummaryTableBody.appendChild(tr);
+      resumenTableBody.appendChild(tr);
     });
   }
-  updateSortIndicators('signals-summary-table', signalsSortState);
+
+  updateSortIndicators('resumen-table', resumenSortState);
+
+  const clearFiltersLink = document.getElementById('clear-filters-link');
+  if (clearFiltersLink) {
+    clearFiltersLink.addEventListener('click', (event) => {
+      event.preventDefault();
+      state.filters = { estado: 'todos', tipo: 'todos', senal: 'todos', search: '' };
+      filterEstado.value = 'todos';
+      filterTipo.value = 'todos';
+      filterSenal.value = 'todos';
+      filterSearch.value = '';
+      renderResumenTable();
+    });
+  }
+}
+
+resumenTableBody.addEventListener('change', (event) => {
+  const select = event.target.closest('select.status-select');
+  if (!select) return;
+  updateClassification(select.dataset.symbol, select.value, select);
+});
+
+resumenTableBody.addEventListener('click', (event) => {
+  if (event.target.closest('select')) return;
+  const tr = event.target.closest('tr[data-symbol]');
+  if (!tr) return;
+  openDetail(tr.dataset.symbol);
+});
+
+filterEstado.addEventListener('change', () => { state.filters.estado = filterEstado.value; renderResumenTable(); });
+filterTipo.addEventListener('change', () => { state.filters.tipo = filterTipo.value; renderResumenTable(); });
+filterSenal.addEventListener('change', () => { state.filters.senal = filterSenal.value; renderResumenTable(); });
+filterSearch.addEventListener('input', () => { state.filters.search = filterSearch.value; renderResumenTable(); });
+
+// ── Pestaña Detalle ──
+
+function openDetail(symbol) {
+  if (state.selectedSymbol && state.selectedSymbol !== symbol && chartInstances[state.selectedSymbol]) {
+    chartInstances[state.selectedSymbol].destroy();
+    delete chartInstances[state.selectedSymbol];
+  }
+  state.selectedSymbol = symbol;
+  activateTab('detalle');
+  renderDetail();
+}
+
+function renderDetail() {
+  const symbol = state.selectedSymbol;
+  if (!symbol) {
+    detailContent.innerHTML = '<div class="empty-state">Hacé clic en una fila de "Resumen" para ver el detalle de un símbolo.</div>';
+    return;
+  }
+
+  const signal = state.mainSignals.find((s) => s.symbol === symbol);
+  if (!signal) {
+    detailContent.innerHTML = `<div class="empty-state">Sin datos para ${symbol} todavía.</div>`;
+    return;
+  }
+
+  const classification = state.classifications[symbol] ?? 'apto';
+  const assessment = state.assessmentsBySymbol.get(symbol);
+  const backtestSummary = state.backtestSummaryBySymbol.get(symbol);
+  const position = state.positionsBySymbol.get(symbol);
+  const hybrid = state.hybridSignals.find((h) => h.symbol === symbol);
+
+  detailContent.innerHTML = `
+    <div class="symbol-report-card detail-card">
+      <div class="symbol-report-header">
+        <h4>${symbol} <span class="muted" style="font-size:0.8em">${signal.type === 'ETF' ? 'ETF' : 'Acción'} · ${signal.systemLabel ?? '1D'}</span></h4>
+        <div class="detail-header-actions">
+          <span class="signal-badge ${signalClass(signal.signal)}">${signal.signal}</span>
+          ${renderStatusSelect(symbol, classification)}
+        </div>
+      </div>
+      <div class="symbol-stats-grid">${renderSymbolStats(signal)}</div>
+      <p class="muted symbol-reason">Motivo: ${signal.reason}</p>
+      <div class="symbol-position">${signal.positionLine ?? renderPositionLine(position)}</div>
+      <div class="chart-toggles">
+        <label><input type="checkbox" id="toggle-ma" ${state.chartToggles.ma ? 'checked' : ''}> Medias móviles</label>
+        <label><input type="checkbox" id="toggle-bb" ${state.chartToggles.bb ? 'checked' : ''}> Bollinger</label>
+        <label><input type="checkbox" id="toggle-osc" ${state.chartToggles.osc ? 'checked' : ''}> Oscilador</label>
+      </div>
+      <div class="chart-canvas-wrap detail-chart-canvas-wrap"><canvas id="detail-chart-canvas"></canvas></div>
+      <p class="muted chart-no-data hidden" id="detail-chart-empty">Sin datos históricos todavía. Ejecutá la ingesta.</p>
+      <div class="symbol-subsection">
+        <h5>Evaluación de IA (Claude)</h5>
+        <div class="symbol-assessment">${renderAssessmentBlock(assessment)}</div>
+      </div>
+      <div class="symbol-subsection">
+        <h5>Backtest</h5>
+        <div class="symbol-backtest">${renderBacktestBlock(backtestSummary)}</div>
+      </div>
+      ${hybrid ? `
+      <div class="symbol-subsection">
+        <h5>Sistema ${hybrid.system === 'shadow' ? 'sombra' : 'paralelo'} (1H)</h5>
+        <p class="muted">Señal: <span class="${signalClass(hybrid.signal)}">${hybrid.signal}</span> · ${hybrid.reason ?? ''}</p>
+      </div>` : ''}
+    </div>
+  `;
+
+  detailContent.querySelector('select.status-select').addEventListener('change', (event) => {
+    updateClassification(symbol, event.target.value, event.target);
+  });
+
+  const redrawChart = () => renderSymbolCharts([{
+    signal,
+    cardKey: symbol,
+    canvas: document.getElementById('detail-chart-canvas'),
+    noDataMsg: document.getElementById('detail-chart-empty'),
+  }]);
+
+  [['toggle-ma', 'ma'], ['toggle-bb', 'bb'], ['toggle-osc', 'osc']].forEach(([id, key]) => {
+    document.getElementById(id).addEventListener('change', (event) => {
+      state.chartToggles[key] = event.target.checked;
+      redrawChart();
+    });
+  });
+
+  redrawChart();
+}
+
+// ── Sidebar (cuenta / posiciones) ──
+
+function renderSidebarAccount(account, openOrdersCount) {
+  if (!account) {
+    sidebarAccount.textContent = 'Sin datos.';
+    return;
+  }
+  const openOrdersText = typeof openOrdersCount === 'number' ? `<br>Órdenes abiertas: ${openOrdersCount}` : '';
+  sidebarAccount.innerHTML =
+    `Equity: ${fmtMoney(account.equity)}<br>Cash: ${fmtMoney(account.cash)}<br>` +
+    `Buying power: ${fmtMoney(account.buyingPower)}${openOrdersText}`;
+}
+
+function renderSidebarPositions(positions) {
+  sidebarPositions.innerHTML = positions.length === 0
+    ? 'Sin posiciones abiertas.'
+    : `<strong>${positions.length}</strong> posiciones abiertas`;
 }
 
 function renderConditionsTable() {
@@ -1037,7 +1193,7 @@ async function loadSymbolReports() {
 
     const statusData = await statusRes.json();
     if (!statusData.ok) {
-      tradingAccount.textContent = `Error al cargar estado de trading: ${statusData.error}`;
+      sidebarAccount.textContent = `Error: ${statusData.error}`;
       return;
     }
 
@@ -1047,13 +1203,8 @@ async function loadSymbolReports() {
 
     const { account, positions, signals, hybridSignals, parallelPositions, orders, openOrdersCount } = statusData;
 
-    const openOrdersText = typeof openOrdersCount === 'number'
-      ? ` · Órdenes abiertas en Alpaca: ${openOrdersCount}`
-      : '';
-
-    tradingAccount.textContent =
-      `Cuenta ${account.accountNumber} (${account.status}) · Equity: ${fmtMoney(account.equity)} · ` +
-      `Cash: ${fmtMoney(account.cash)} · Buying power: ${fmtMoney(account.buyingPower)}${openOrdersText}`;
+    renderSidebarAccount(account, openOrdersCount);
+    renderSidebarPositions(positions);
 
     const assessmentsBySymbol = new Map(
       (assessmentsData.ok ? assessmentsData.assessments : []).map((a) => [a.symbol, a])
@@ -1076,28 +1227,24 @@ async function loadSymbolReports() {
         aiRationale:        assessment?.rationale ?? null,
       };
       if (HYBRID_TIER1_SYMBOLS.includes(signal.symbol)) {
-        return { ...signal, systemLabel: '1H', cardBadge: '1H', chartQuery: '?tf=1H', ...aiFields };
+        return { ...signal, systemLabel: '1H', chartQuery: '?tf=1H', ...aiFields };
       }
       return { ...signal, systemLabel: '1D', ...aiFields };
     });
 
     // Decorar señales híbridas 1H (tier 2 / shadow) con systemLabel y tipo heredado.
-    // Reutilizan la evaluación AI del símbolo main (no tienen evaluación propia).
     const decoratedHybridSignals = (hybridSignals ?? []).map((signal) => {
       const systemLabel = signal.system === 'shadow' ? '1H · Sombra' : '1H · Paralelo';
       const mainSignal = signals.find((s) => s.symbol === signal.symbol);
-      const assessment = assessmentsBySymbol.get(signal.symbol);
-      return {
-        ...signal, systemLabel, type: mainSignal?.type ?? 'STOCK',
-        simplifiedReason: assessment?.simplifiedReason ?? null,
-        aiRecommendation: assessment?.recommendation ?? null,
-        aiConfidence:     assessment?.confidence ?? null,
-        aiRationale:      assessment?.rationale ?? null,
-      };
+      return { ...signal, systemLabel, type: mainSignal?.type ?? 'STOCK' };
     });
 
-    // Tabla "Resumen de señales": main (20) + híbridas (3).
-    latestSignals = [...decoratedSignals, ...decoratedHybridSignals];
+    state.mainSignals = decoratedSignals;
+    state.hybridSignals = decoratedHybridSignals;
+    state.assessmentsBySymbol = assessmentsBySymbol;
+    state.backtestSummaryBySymbol = backtestSummaryBySymbol;
+    state.positionsBySymbol = positionsBySymbol;
+    state.positions = positions;
 
     // Tabla "Condiciones por símbolo": decorar con systemLabel desde server.
     const rawConditions = conditionsData.ok ? conditionsData.conditions : [];
@@ -1113,73 +1260,14 @@ async function loadSymbolReports() {
       return { ...c, systemLabel };
     });
 
-    renderSignalsSummaryTable();
+    renderResumenTable();
     renderConditionsTable();
-
-    // Tarjetas por símbolo: insertar card sintética para tier2/shadow justo después de la main.
-    const parallelPositionsBySymbol = new Map(
-      (parallelPositions ?? []).filter((p) => p.status === 'open').map((p) => [p.symbol, p])
-    );
-    const conditions1HBySymbol = new Map(
-      latestConditions.filter((c) => c.timeframe === '1Hour').map((c) => [c.symbol, c])
-    );
-
-    function buildHybridSyntheticSignal(hybridSig) {
-      const { symbol } = hybridSig;
-      const isShadow = HYBRID_SHADOW_SYMBOLS.includes(symbol);
-      const systemLabel = isShadow ? '1H · Sombra' : '1H · Paralelo';
-      const cond1h = conditions1HBySymbol.get(symbol);
-      const backtestSummary = cond1h
-        ? { trades: cond1h.trades, winRate: cond1h.winRatePct, totalReturnPct: cond1h.totalReturnPct, avgReturnPct: cond1h.avgReturnPct, maxDrawdownPct: cond1h.maxDrawdownPct }
-        : null;
-      const positionLine = isShadow
-        ? '<p class="muted">Modo sombra: solo registra señal, sin posición.</p>'
-        : renderParallelPositionLine(parallelPositionsBySymbol.get(symbol) ?? null);
-      return {
-        ...hybridSig,
-        cardKey: symbol + '::hybrid',
-        cardBadge: systemLabel,
-        chartQuery: '?tf=1H',
-        hideAssessment: true,
-        positionLine,
-        _backtestSummary: backtestSummary,
-      };
-    }
-
-    function spliceHybridCards(signalList) {
-      const result = [];
-      for (const signal of signalList) {
-        result.push(signal);
-        const hybridSig = decoratedHybridSignals.find((h) => h.symbol === signal.symbol);
-        if (hybridSig) {
-          result.push(buildHybridSyntheticSignal(hybridSig));
-        }
-      }
-      return result;
-    }
-
-    const etfSignals = spliceHybridCards(
-      decoratedSignals.filter((signal) => signal.type === 'ETF').sort((a, b) => attractivenessScore(b) - attractivenessScore(a))
-    );
-    const stockSignals = spliceHybridCards(
-      decoratedSignals.filter((signal) => signal.type === 'STOCK').sort((a, b) => attractivenessScore(b) - attractivenessScore(a))
-    );
-
-    // backtestSummaryBySymbol override para tarjetas sintéticas (usa _backtestSummary).
-    const extendedBacktestMap = new Map(backtestSummaryBySymbol);
-    [...etfSignals, ...stockSignals].forEach((signal) => {
-      if (signal._backtestSummary) extendedBacktestMap.set(signal.cardKey, signal._backtestSummary);
-    });
-
-    const etfEntries = renderSymbolReportsGroup(symbolReportsEtf, etfSignals, assessmentsBySymbol, extendedBacktestMap, positionsBySymbol);
-    const stockEntries = renderSymbolReportsGroup(symbolReportsStock, stockSignals, assessmentsBySymbol, extendedBacktestMap, positionsBySymbol);
-
-    await Promise.all([renderSymbolCharts(etfEntries), renderSymbolCharts(stockEntries)]);
+    if (state.selectedSymbol) renderDetail();
 
     renderPositionsTable(positions);
     renderOrdersTable(orders);
   } catch (error) {
-    tradingAccount.textContent = `Error al cargar resumen por símbolo: ${error}`;
+    sidebarAccount.textContent = `Error: ${error}`;
   }
 }
 
@@ -1290,12 +1378,14 @@ riskPresetSelect.addEventListener('change', () => {
   });
 });
 
-setupSortableTable('signals-summary-table', signalsSortState, renderSignalsSummaryTable);
+setupSortableTable('resumen-table', resumenSortState, renderResumenTable);
 setupSortableTable('conditions-table', conditionsSortState, renderConditionsTable);
 
 loadHealth();
 loadSettings();
+loadClassifications();
 loadSymbolReports();
 loadSnapshots();
 setInterval(loadHealth, 60000);
 setInterval(loadSymbolReports, 60000);
+setInterval(loadClassifications, 60000);

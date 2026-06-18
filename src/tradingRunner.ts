@@ -29,6 +29,7 @@ import {
   AlpacaOrder,
 } from './services/alpaca';
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './services/tradingStore';
+import { setupSymbolClassificationSchema, getSymbolClassification } from './services/symbolClassificationStore';
 import { computeSignal, SignalResult } from './strategy/signals';
 import { DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
@@ -89,6 +90,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     await setupTradingSchema(pool);
     await setupSettingsSchema(pool);
     await setupConditionSchema(pool);
+    await setupSymbolClassificationSchema(pool);
     const settings = await getSettings(pool);
     const symbolConditions = await getMainSymbolConditions(pool);
 
@@ -247,7 +249,12 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           // señales y evaluaciones de IA ya se calcularon/guardaron arriba normalmente.
           actions.push({ type: 'TRADING_DISABLED', symbol });
         } else if (signal.signal === 'BUY') {
-          if (position) {
+          const classification = await getSymbolClassification(pool, symbol);
+
+          if (classification === 'bloqueado') {
+            console.log(`[${symbol}] BUY bloqueado por clasificación manual (BLOQUEADO_MANUAL)`);
+            actions.push({ type: 'NO_ACTION', symbol, reason: 'BLOQUEADO_MANUAL' });
+          } else if (position) {
             actions.push({ type: 'NO_ACTION', symbol, reason: 'Ya existe una posición abierta' });
           } else if (symbolOpenOrders.length > 0) {
             actions.push({ type: 'NO_ACTION', symbol, reason: 'Ya hay una orden pendiente' });

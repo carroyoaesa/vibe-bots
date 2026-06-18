@@ -32,6 +32,12 @@ import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } fro
 import { setupConditionSchema, getSymbolConditions, getMainSymbolConditions } from './services/conditionStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
+import {
+  setupSymbolClassificationSchema,
+  getAllSymbolClassifications,
+  setSymbolClassification,
+  SYMBOL_CLASSIFICATION_STATUSES,
+} from './services/symbolClassificationStore';
 
 // Evita que errores async no manejados (p.ej. Redis disconnect, Alpaca timeout) maten el proceso.
 // Node 18 termina en unhandledRejection por defecto; aquí lo degradamos a un log de error.
@@ -430,6 +436,47 @@ app.get('/api/assessments', async (_req, res) => {
     await setupTradingSchema(pool);
     const assessments = await getLatestAssessments(pool);
     res.json({ ok: true, generatedAt: new Date().toISOString(), assessments });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/symbol-classifications', async (_req, res) => {
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSymbolClassificationSchema(pool);
+    const classifications = await getAllSymbolClassifications(pool);
+    res.json(classifications);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.post('/api/symbol-classifications/:symbol', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  const status = req.body?.status;
+
+  if (!WATCHLIST.includes(symbol)) {
+    res.status(400).json({ ok: false, error: `Símbolo no soportado: ${symbol}` });
+    return;
+  }
+
+  if (!SYMBOL_CLASSIFICATION_STATUSES.includes(status)) {
+    res.status(400).json({ ok: false, error: `status inválido: debe ser uno de ${SYMBOL_CLASSIFICATION_STATUSES.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSymbolClassificationSchema(pool);
+    await setSymbolClassification(pool, symbol, status);
+    res.json({ ok: true, symbol, status, updatedAt: new Date().toISOString() });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {
