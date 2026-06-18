@@ -35,6 +35,12 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
   await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS system TEXT NOT NULL DEFAULT 'main'`);
   await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS timeframe TEXT NOT NULL DEFAULT '1Day'`);
 
+  // Fase Operaciones multi-cuenta (2026-06-18): 'aptos'/'observados'/'bloqueados' (deriva de
+  // symbol_classifications al momento de guardar, ver classificationToAccountGroup) o 'legacy'
+  // para filas existentes antes de esta columna - el ruteo REAL de la orden sigue siendo la
+  // única cuenta de ALPACA_API_KEY (sin cambios), esto es solo etiquetado para la tab Operaciones.
+  await pool.query(`ALTER TABLE trading_signals ADD COLUMN IF NOT EXISTS account_group TEXT NOT NULL DEFAULT 'legacy'`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS trading_orders (
       id SERIAL PRIMARY KEY,
@@ -55,6 +61,9 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
   // Fase híbrido: órdenes del sistema paralelo (Tier 2) se marcan 'parallel' para
   // distinguirlas de las órdenes 'main' en el dashboard.
   await pool.query(`ALTER TABLE trading_orders ADD COLUMN IF NOT EXISTS system TEXT NOT NULL DEFAULT 'main'`);
+
+  // Fase Operaciones multi-cuenta (2026-06-18): mismo criterio que trading_signals.account_group.
+  await pool.query(`ALTER TABLE trading_orders ADD COLUMN IF NOT EXISTS account_group TEXT NOT NULL DEFAULT 'legacy'`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ai_assessments (
@@ -84,11 +93,12 @@ export async function saveSignal(
   pool: Pool,
   signal: SignalResult,
   system: 'main' | 'parallel' | 'shadow' = 'main',
-  timeframe: '1Day' | '1Hour' = '1Day'
+  timeframe: '1Day' | '1Hour' = '1Day',
+  accountGroup: string = 'legacy'
 ): Promise<number> {
   const result = await pool.query<{ id: number }>(
-    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label, system, timeframe)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    `INSERT INTO trading_signals (symbol, price, sma_fast, sma_slow, rsi, momentum, estimated_entry_price, estimated_exit_price, signal, reason, buy_condition_id, buy_condition_label, sell_condition_id, sell_condition_label, system, timeframe, account_group)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      RETURNING id`,
     [
       signal.symbol,
@@ -107,6 +117,7 @@ export async function saveSignal(
       signal.sellConditionLabel,
       system,
       timeframe,
+      accountGroup,
     ]
   );
 
@@ -126,13 +137,15 @@ export interface TradingOrderRecord {
   raw?: unknown;
   /** Fase híbrido: 'parallel' para órdenes del sistema paralelo (Tier 2, ver `strategy/hybridConfig.ts`). Default 'main'. */
   system?: 'main' | 'parallel';
+  /** Fase Operaciones multi-cuenta: grupo derivado de la clasificación del símbolo al momento de guardar. Default 'legacy'. */
+  accountGroup?: string;
 }
 
 export async function saveOrder(pool: Pool, order: TradingOrderRecord): Promise<void> {
   await pool.query(
     `INSERT INTO trading_orders
-       (signal_id, symbol, side, qty, order_type, alpaca_order_id, take_profit_price, stop_loss_price, status, raw, system)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       (signal_id, symbol, side, qty, order_type, alpaca_order_id, take_profit_price, stop_loss_price, status, raw, system, account_group)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
     [
       order.signalId,
       order.symbol,
@@ -145,6 +158,7 @@ export async function saveOrder(pool: Pool, order: TradingOrderRecord): Promise<
       order.status,
       order.raw ? JSON.stringify(order.raw) : null,
       order.system ?? 'main',
+      order.accountGroup ?? 'legacy',
     ]
   );
 }

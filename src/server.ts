@@ -6,7 +6,10 @@ import { runIngest } from './ingestRunner';
 import { runTradingCycle } from './tradingRunner';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, listSnapshots, getSnapshotStream } from './services/storage';
-import { createAlpacaClient, getAccount, getPositions, AlpacaOrder } from './services/alpaca';
+import { createAlpacaClient, getAccount, getPositions, AlpacaOrder, ACCOUNT_GROUPS, AccountGroup, getAlpacaClient, placeSellOrder, cancelOrder } from './services/alpaca';
+import { setupOperationsSyncSchema, syncAccountState, syncAllAccounts } from './services/operationsSync';
+import { startOperationsPoller, POLLER_INTERVAL_SECONDS } from './operationsPoller';
+import { computeExitPriceEstimate } from './services/exitPriceEstimate';
 import {
   createRedisClient,
   getCachedJson,
@@ -36,6 +39,8 @@ import {
   setupSymbolClassificationSchema,
   getAllSymbolClassifications,
   setSymbolClassification,
+  getSymbolClassification,
+  classificationToAccountGroup,
   SYMBOL_CLASSIFICATION_STATUSES,
 } from './services/symbolClassificationStore';
 
@@ -63,6 +68,25 @@ const app = express();
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use(express.json());
+
+const VALID_ACCOUNT_GROUPS_OR_ALL = [...ACCOUNT_GROUPS, 'all'];
+
+/** `?account=` -> lista de grupos a cubrir (`all` expande a los 3), o `null` si el valor no es válido. */
+function parseAccountParam(value: unknown): AccountGroup[] | null {
+  if (value === undefined || value === 'all') return [...ACCOUNT_GROUPS];
+  if (typeof value === 'string' && (ACCOUNT_GROUPS as string[]).includes(value)) return [value as AccountGroup];
+  return null;
+}
+
+// Poller de sincronización multi-cuenta (Fase Operaciones, 2026-06-18) - pool dedicado de
+// larga vida (a diferencia del resto de las rutas, que abren/cierran un pool por request),
+// igual patrón que cualquier proceso de fondo dentro de este mismo server.ts (nunca systemd,
+// se gestiona con scripts/start-web.sh / stop-web.sh). Corre cada 60s, gateado a horario de
+// mercado - ver `operationsPoller.ts`.
+const operationsPool = createPostgresPool(loadPostgresConfig());
+setupOperationsSyncSchema(operationsPool)
+  .then(() => startOperationsPoller(operationsPool))
+  .catch((error) => console.error('[server] No se pudo inicializar el esquema de sync multi-cuenta:', error));
 
 app.get('/api/config', (_req, res) => {
   res.json({
@@ -477,6 +501,320 @@ app.post('/api/symbol-classifications/:symbol', async (req, res) => {
     await setupSymbolClassificationSchema(pool);
     await setSymbolClassification(pool, symbol, status);
     res.json({ ok: true, symbol, status, updatedAt: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+// ── Operaciones multi-cuenta (Fase 2026-06-18) ──────────────────────────────────────────
+// Fuente de verdad: las tablas *_snapshot/account_state, escritas por el poller de 60s
+// (operationsPoller.ts) y por POST /api/operations/sync - NUNCA se pega a trading_orders/
+// trading_signals (historial propio del bot, posiblemente desactualizado/mezclado) para
+// estas vistas. account_group de trading_orders/trading_signals queda como etiqueta de
+// análisis (ver tradingRunner.ts), no como fuente de la tab Operaciones.
+
+app.get('/api/operations', async (req, res) => {
+  const groups = parseAccountParam(req.query.account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+    const accounts: Record<string, object> = {};
+
+    for (const group of groups) {
+      const [positions, pendingOrders, executedOrders, stateRows] = await Promise.all([
+        pool.query(`SELECT symbol, qty, avg_entry_price, current_price, market_value, unrealized_pl, synced_at FROM positions_snapshot WHERE account_group = $1 ORDER BY symbol`, [group]),
+        pool.query(`SELECT alpaca_order_id, symbol, side, qty, order_type, limit_price, status, submitted_at FROM pending_orders_snapshot WHERE account_group = $1 ORDER BY submitted_at DESC NULLS LAST`, [group]),
+        pool.query(`SELECT alpaca_order_id, symbol, side, qty, order_type, limit_price, status, submitted_at FROM executed_orders_snapshot WHERE account_group = $1 ORDER BY submitted_at DESC NULLS LAST LIMIT 30`, [group]),
+        pool.query(`SELECT equity, cash, buying_power, positions_count, pending_orders_count, last_sync_at, last_sync_ok, last_error FROM account_state WHERE account_group = $1`, [group]),
+      ]);
+
+      accounts[group] = {
+        accountState: stateRows.rows[0] ?? null,
+        positions: positions.rows,
+        pendingOrders: pendingOrders.rows,
+        executedOrders: executedOrders.rows,
+      };
+    }
+
+    res.json({ ok: true, generatedAt: new Date().toISOString(), pollerIntervalSeconds: POLLER_INTERVAL_SECONDS, accounts });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/account-status', async (req, res) => {
+  const groups = parseAccountParam(req.query.account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+    const accounts: Record<string, object | null> = {};
+
+    for (const group of groups) {
+      const { rows } = await pool.query(
+        `SELECT equity, cash, buying_power, positions_count, pending_orders_count, last_sync_at, last_sync_ok, last_error FROM account_state WHERE account_group = $1`,
+        [group]
+      );
+      accounts[group] = rows[0] ?? null;
+    }
+
+    res.json({ ok: true, generatedAt: new Date().toISOString(), pollerIntervalSeconds: POLLER_INTERVAL_SECONDS, accounts });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.post('/api/operations/sync', async (req, res) => {
+  const account = req.body?.account ?? 'all';
+  const groups = parseAccountParam(account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+
+    if (account === 'all') {
+      const results = await syncAllAccounts(pool, 'manual');
+      res.json({ ok: true, finishedAt: new Date().toISOString(), results });
+    } else {
+      const result = await syncAccountState(pool, groups[0], 'manual');
+      res.json({ ok: true, finishedAt: new Date().toISOString(), result });
+    }
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/sync-log', async (req, res) => {
+  const groups = parseAccountParam(req.query.account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+  const limit = Math.min(Number(req.query.limit ?? 20) || 20, 200);
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+    const { rows } = await pool.query(
+      `SELECT id, account_group, sync_type, started_at, finished_at, positions_count, orders_count, errors
+       FROM sync_log WHERE account_group = ANY($1) ORDER BY started_at DESC LIMIT $2`,
+      [groups, limit]
+    );
+    res.json({ ok: true, generatedAt: new Date().toISOString(), entries: rows });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/sync-discrepancies', async (req, res) => {
+  const groups = parseAccountParam(req.query.account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+  const since = typeof req.query.since === 'string' ? new Date(req.query.since) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+    const { rows } = await pool.query(
+      `SELECT id, account_group, symbol, type, db_state, alpaca_state, detected_at
+       FROM sync_discrepancies WHERE account_group = ANY($1) AND detected_at >= $2 ORDER BY detected_at DESC`,
+      [groups, since]
+    );
+    res.json({ ok: true, generatedAt: new Date().toISOString(), since: since.toISOString(), discrepancies: rows });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/orders/pending', async (req, res) => {
+  const groups = parseAccountParam(req.query.account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+    const { rows } = await pool.query(
+      `SELECT account_group, alpaca_order_id, symbol, side, qty, order_type, limit_price, status, submitted_at
+       FROM pending_orders_snapshot WHERE account_group = ANY($1) ORDER BY submitted_at DESC NULLS LAST`,
+      [groups]
+    );
+    res.json({ ok: true, generatedAt: new Date().toISOString(), orders: rows });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/orders/stale', async (req, res) => {
+  const groups = parseAccountParam(req.query.account);
+  if (!groups) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${VALID_ACCOUNT_GROUPS_OR_ALL.join(', ')}.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupOperationsSyncSchema(pool);
+    await setupSettingsSchema(pool);
+    const settings = await getSettings(pool);
+
+    const { rows } = await pool.query(
+      `SELECT account_group, alpaca_order_id, symbol, side, qty, order_type, limit_price, status, submitted_at
+       FROM pending_orders_snapshot
+       WHERE account_group = ANY($1) AND side = 'buy' AND submitted_at < NOW() - ($2 || ' minutes')::INTERVAL
+       ORDER BY submitted_at ASC`,
+      [groups, settings.pendingOrderTimeoutMin]
+    );
+
+    res.json({ ok: true, generatedAt: new Date().toISOString(), timeoutMin: settings.pendingOrderTimeoutMin, autoCancelEnabled: settings.autoCancelStaleOrders, orders: rows });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.post('/api/orders/:orderId/cancel', async (req, res) => {
+  const orderId = req.params.orderId;
+  const groups = parseAccountParam(req.query.account);
+
+  if (!groups || groups.length !== 1) {
+    res.status(400).json({ ok: false, error: `account inválido: debe ser uno de ${ACCOUNT_GROUPS.join(', ')} (no se acepta 'all' acá).` });
+    return;
+  }
+  const group = groups[0];
+
+  const client = getAlpacaClient(group);
+  if (!client) {
+    res.status(400).json({ ok: false, error: `Sin credenciales configuradas para el grupo '${group}'.` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await cancelOrder(client, orderId);
+    // Re-sync inmediato del grupo para que positions_snapshot/pending_orders_snapshot
+    // reflejen la cancelación sin esperar al próximo tick del poller de 60s.
+    await setupOperationsSyncSchema(pool);
+    const result = await syncAccountState(pool, group, 'post_order');
+    res.json({ ok: true, orderId, group, cancelledAt: new Date().toISOString(), result });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/positions/:symbol/exit-price', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  if (!WATCHLIST.includes(symbol)) {
+    res.status(400).json({ ok: false, error: `Símbolo no soportado: ${symbol}` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupSymbolClassificationSchema(pool);
+    await setupOperationsSyncSchema(pool);
+
+    // El grupo se DERIVA server-side de la clasificación actual del símbolo (no se confía
+    // en un `account` que mande el cliente) - es el mismo criterio que usa el botón "Vender
+    // al precio estimado" para decidir a qué cuenta correspondería la posición.
+    const classification = await getSymbolClassification(pool, symbol);
+    const accountGroup = classificationToAccountGroup(classification);
+
+    const [estimate, positionRow] = await Promise.all([
+      computeExitPriceEstimate(pool, symbol),
+      pool.query(`SELECT qty FROM positions_snapshot WHERE account_group = $1 AND symbol = $2`, [accountGroup, symbol]),
+    ]);
+
+    res.json({
+      ok: true,
+      symbol,
+      accountGroup,
+      hasPosition: positionRow.rows.length > 0,
+      qty: positionRow.rows[0]?.qty ?? null,
+      ...estimate,
+    });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.post('/api/positions/:symbol/sell-at-estimate', async (req, res) => {
+  const symbol = req.params.symbol.toUpperCase();
+  if (!WATCHLIST.includes(symbol)) {
+    res.status(400).json({ ok: false, error: `Símbolo no soportado: ${symbol}` });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+  try {
+    await setupSymbolClassificationSchema(pool);
+    await setupOperationsSyncSchema(pool);
+
+    const classification = await getSymbolClassification(pool, symbol);
+    const accountGroup = classificationToAccountGroup(classification);
+
+    const client = getAlpacaClient(accountGroup);
+    if (!client) {
+      res.status(400).json({ ok: false, error: `Sin credenciales configuradas para el grupo '${accountGroup}' (clasificación '${classification}' de ${symbol}).` });
+      return;
+    }
+
+    const estimate = await computeExitPriceEstimate(pool, symbol);
+    if (estimate.price === null) {
+      res.status(400).json({ ok: false, error: `Sin precio de salida proyectable para ${symbol} (motivo: ${estimate.reason}).` });
+      return;
+    }
+
+    // Posición REAL al momento de confirmar (no el snapshot, que puede tener hasta 60s) -
+    // esta es la única acción de esta fase que envía una orden real a una cuenta por grupo,
+    // y solo ocurre cuando el usuario confirma explícitamente desde la UI.
+    const positions = await getPositions(client);
+    const position = positions.find((p) => p.symbol === symbol);
+    if (!position) {
+      res.status(404).json({ ok: false, error: `Sin posición abierta para ${symbol} en la cuenta '${accountGroup}'.` });
+      return;
+    }
+
+    const order = await placeSellOrder(client, { symbol, qty: position.qty, limitPrice: estimate.price });
+    await syncAccountState(pool, accountGroup, 'post_order');
+
+    res.json({ ok: true, symbol, accountGroup, qty: position.qty, limitPrice: estimate.price, alpacaOrderId: order.id, placedAt: new Date().toISOString() });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

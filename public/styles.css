@@ -672,3 +672,137 @@ footer {
   text-align: center;
   margin-top: 1.5rem;
 }
+
+/* ── Operaciones multi-cuenta ── */
+
+.account-pills {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.account-pill {
+  background: #14171c;
+  border: 1px solid #2a2e35;
+  border-radius: 999px;
+  color: #9aa0a6;
+  padding: 0.35rem 0.9rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.account-pill:hover:not(.active) {
+  color: #c7c9cc;
+  border-color: #3a3f48;
+}
+
+.account-pill.active {
+  color: #4a82f0;
+  border-color: #4a82f0;
+  background: rgba(74, 130, 240, 0.12);
+}
+
+.ops-banner {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  background: #1a1d23;
+  border: 1px solid #2a2e35;
+  border-radius: 10px;
+  padding: 0.85rem 1.25rem;
+  font-size: 0.85rem;
+}
+
+.ops-banner .stat-label {
+  color: #9aa0a6;
+  margin-right: 0.35rem;
+}
+
+.ops-banner .ops-sync-indicator {
+  margin-left: auto;
+  color: #9aa0a6;
+  font-size: 0.78rem;
+  align-self: center;
+}
+
+.ops-alerts {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.alert-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: rgba(231, 76, 60, 0.12);
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  color: #e74c3c;
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.78rem;
+}
+
+.alert-chip.alert-chip-warn {
+  background: rgba(241, 196, 15, 0.12);
+  border-color: rgba(241, 196, 15, 0.4);
+  color: #f1c40f;
+}
+
+.badge-account {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  border: 1px solid #2a2e35;
+  color: #9aa0a6;
+  white-space: nowrap;
+}
+
+.badge-account-aptos {
+  color: #2ecc71;
+  border-color: rgba(46, 204, 113, 0.4);
+}
+
+.badge-account-observados {
+  color: #f1c40f;
+  border-color: rgba(241, 196, 15, 0.4);
+}
+
+.badge-account-bloqueados {
+  color: #e74c3c;
+  border-color: rgba(231, 76, 60, 0.4);
+}
+
+.badge-stale {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  background: rgba(241, 196, 15, 0.15);
+  border: 1px solid rgba(241, 196, 15, 0.4);
+  color: #f1c40f;
+}
+
+.btn-small {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  background: #14171c;
+  border: 1px solid #2a2e35;
+  border-radius: 6px;
+  color: #e6e6e6;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.btn-small:hover:not(:disabled) {
+  border-color: #4a82f0;
+  color: #4a82f0;
+}
+
+.btn-small:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

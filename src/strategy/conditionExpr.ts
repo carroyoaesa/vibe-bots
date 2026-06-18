@@ -189,7 +189,34 @@ export function estimateConditionExprEntryPrice(
   const ids = leafIds(node);
   const triggeredIds = ids.filter((id) => CONDITIONS.find((c) => c.id === id)?.evaluate(ctx, i) === 'BUY');
   const idsToUse = triggeredIds.length > 0 ? triggeredIds : ids;
+  // Filtra hojas con resultado inválido (null) antes de promediar - una hoja sin nivel
+  // proyectable (ej. rsi_reversal_30_70 en el caso de salida) no debe arrastrar el promedio
+  // a null si las demás hojas sí son proyectables (Fase Operaciones multi-cuenta, 2026-06-18).
   const prices = idsToUse.map((id) => computeEntryPrice(ctx, i, id)).filter((p): p is number => p !== null);
   if (prices.length === 0) return null;
   return prices.reduce((sum, p) => sum + p, 0) / prices.length;
+}
+
+/**
+ * Precio estimado de SALIDA para una expresión de venta compuesta: promedio de
+ * `computeExitLevel` (`computeEstimatedExitLevel` en `conditions.ts`) sobre las hojas que
+ * efectivamente dispararon SELL en `i` (si ninguna disparó, promedia todas las hojas
+ * proyectables como fallback). Devuelve `null` si NINGUNA hoja tiene nivel proyectable
+ * (ej. expresión compuesta solo de `rsi_reversal_30_70`) - el caller debe mostrar
+ * "no proyectable", no un precio inventado. Mismo patrón que `estimateConditionExprEntryPrice`,
+ * pero sin el fallback histórico a `price` (acá una hoja no proyectable se DESCARTA, no
+ * se sustituye).
+ */
+export function estimateConditionExprExitPrice(
+  node: ConditionExprNode,
+  ctx: IndicatorContext,
+  i: number,
+  computeExitLevel: (ctx: IndicatorContext, i: number, conditionId: string) => number | null
+): number | null {
+  const ids = leafIds(node);
+  const triggeredIds = ids.filter((id) => CONDITIONS.find((c) => c.id === id)?.evaluate(ctx, i) === 'SELL');
+  const idsToUse = triggeredIds.length > 0 ? triggeredIds : ids;
+  const levels = idsToUse.map((id) => computeExitLevel(ctx, i, id)).filter((p): p is number => p !== null);
+  if (levels.length === 0) return null;
+  return levels.reduce((sum, p) => sum + p, 0) / levels.length;
 }
