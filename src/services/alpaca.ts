@@ -30,7 +30,7 @@ export function getAlpacaClient(group: AccountGroup): AxiosInstance | null {
   const endpoint = process.env[`ALPACA_${prefix}_ENDPOINT`];
 
   if (!apiKey || !apiSecret || !endpoint) {
-    console.warn(`[getAlpacaClient] Sin credenciales completas para el grupo '${group}' (ALPACA_${prefix}_KEY/_SECRET/_ENDPOINT) - sync omitida para este grupo.`);
+    console.warn(`[getAlpacaClient] Sin credenciales completas para el grupo '${group}' (ALPACA_${prefix}_KEY/_SECRET/_ENDPOINT) - sync/backtest interno omitido para este grupo, sin Alpaca.`);
     return null;
   }
 
