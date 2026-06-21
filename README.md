@@ -195,10 +195,10 @@ La cadencia horaria es deliberadamente conservadora: la estrategia opera sobre c
 ### Exposición vía API/web
 
 - `GET /api/trading/status`: cuenta (equity/cash/buying power), posiciones abiertas, órdenes recientes y **señales recalculadas en el momento** (no cacheadas, usando el perfil de riesgo activo de `bot_settings`) para los 20 símbolos del watchlist, cada una etiquetada como `type: 'ETF' | 'STOCK'` según `ETF_SYMBOLS`. `estimatedEntryPrice`/`estimatedExitPrice` de cada señal se sobrescriben con el último valor persistido en `trading_signals` (= verificado/ajustado por IA en el ciclo más reciente), si existe.
-- `POST /api/trading/run`: ejecuta `runTradingCycle()` (misma lógica que `npm run trade`) - **coloca/cierra órdenes reales en la cuenta paper**.
+- `POST /api/trading/run`: antes de ejecutar nada, consulta `GET /v2/clock` (mismo guard que `cronTrade.ts`); si el mercado está cerrado, devuelve `{ ok: true, skipped: true, reason: 'MARKET_CLOSED', nextOpen }` sin tocar Alpaca. Si está abierto, ejecuta `runTradingCycle()` (misma lógica que `npm run trade`) - **coloca/cierra órdenes reales en la cuenta paper**.
 - El frontend (`public/`) integra estos datos en la sección "Resumen por símbolo" (gráficos y tablas por símbolo, más posiciones/órdenes al final) con un botón "Ejecutar ciclo de trading" que pide confirmación antes de llamar a `POST /api/trading/run`.
 
-> ⚠️ Tanto `npm run trade` como el botón del dashboard y `POST /api/trading/run` colocan órdenes reales (con dinero simulado) en la cuenta **paper** de Alpaca. No hay modo "solo simulación" adicional en esta fase: el "paper" de Alpaca ya es el entorno de prueba.
+> ⚠️ Tanto `npm run trade` como el botón del dashboard y `POST /api/trading/run` colocan órdenes reales (con dinero simulado) en la cuenta **paper** de Alpaca, salvo que el mercado esté cerrado (ver guard arriba). No hay modo "solo simulación" adicional en esta fase: el "paper" de Alpaca ya es el entorno de prueba.
 
 ## Capa de IA (Claude)
 
@@ -408,7 +408,7 @@ Ver `CLAUDE.md` (sección "Fase 8") para el detalle técnico completo, incluyend
 - `POST /api/ingest` - ejecuta `src/ingestRunner.ts` (misma lógica que `npm run ingest`) y devuelve un resumen JSON.
 - `GET /api/trading/status` - cuenta, posiciones, señales (frescas, ETF + Acciones) y órdenes recientes (ver más arriba).
 - `GET /api/trading/chart/:symbol` - serie de las últimas `CHART_LOOKBACK_BARS` (**365**) velas OHLC de un símbolo (opcionalmente `?tf=1H` para 600 velas horarias), con el precio de cierre + TODOS los campos de `IndicatorContext` (`ChartPoint`: sma10/20/30/50, ema12/26, rsi14, macd/macdSignal, bandas de Bollinger, estocástico %K/%D, Williams %R, CCI20, canal de Donchian) vía `buildChartSeries` (`src/strategy/chart.ts`, datos de `getRecentOhlcBars`). El frontend elige qué campos mostrar como overlay según las condiciones activas del símbolo (`CONDITION_CHART_CONFIG`, ver "Resumen por símbolo" más abajo).
-- `POST /api/trading/run` - ejecuta `src/tradingRunner.ts` (misma lógica que `npm run trade`); **coloca/cierra órdenes reales en la cuenta paper de Alpaca**.
+- `POST /api/trading/run` - chequea `GET /v2/clock` primero (igual que `cronTrade.ts`); si el mercado está cerrado devuelve `{ ok: true, skipped: true, reason: 'MARKET_CLOSED' }` sin ejecutar nada. Si está abierto, ejecuta `src/tradingRunner.ts` (misma lógica que `npm run trade`); **coloca/cierra órdenes reales en la cuenta paper de Alpaca**.
 - `POST /api/backtesting/run` - corre el backtest del watchlist completo y lo persiste (ver más arriba).
 - `GET /api/backtesting/results` - última corrida de backtest persistida, con sus trades.
 - `GET /api/conditions` - condición técnica activa de cada símbolo (`symbol_conditions`) + catálogo completo de las 12 condiciones disponibles (ver "Fase 6: estrategia multi-condicional por símbolo" más arriba).

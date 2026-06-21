@@ -6,7 +6,7 @@ import { runIngest } from './ingestRunner';
 import { runTradingCycle } from './tradingRunner';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, listSnapshots, getSnapshotStream } from './services/storage';
-import { createAlpacaClient, getAccount, getPositions, AlpacaOrder, ACCOUNT_GROUPS, AccountGroup, getAlpacaClient, placeSellOrder, cancelOrder } from './services/alpaca';
+import { createAlpacaClient, getAccount, getPositions, getMarketClock, AlpacaOrder, ACCOUNT_GROUPS, AccountGroup, getAlpacaClient, placeSellOrder, cancelOrder } from './services/alpaca';
 import { setupOperationsSyncSchema, syncAccountState, syncAllAccounts } from './services/operationsSync';
 import { startOperationsPoller, POLLER_INTERVAL_SECONDS } from './operationsPoller';
 import { computeExitPriceEstimate } from './services/exitPriceEstimate';
@@ -197,6 +197,23 @@ app.get('/api/trading/chart/:symbol', async (req, res) => {
 
 app.post('/api/trading/run', async (_req, res) => {
   try {
+    // Mismo guard que cronTrade.ts: el botón manual del dashboard no debe colocar
+    // órdenes reales con el mercado cerrado (fines de semana/feriados) - antes de
+    // este chequeo, un click manual fuera de horario igual ejecutaba el ciclo
+    // completo y Alpaca encolaba la orden para la siguiente sesión sin avisar.
+    const clock = await getMarketClock(createAlpacaClient(loadAlpacaConfig()));
+    if (!clock.isOpen) {
+      res.json({
+        ok: true,
+        skipped: true,
+        reason: 'MARKET_CLOSED',
+        message: `Mercado cerrado (próxima apertura: ${clock.nextOpen}). Ciclo no ejecutado.`,
+        nextOpen: clock.nextOpen,
+        finishedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
     const result = await runTradingCycle();
     res.json({ ok: true, finishedAt: new Date().toISOString(), ...result });
   } catch (error) {
