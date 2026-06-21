@@ -482,6 +482,18 @@ tr.clickable-row:hover td {
   cursor: pointer;
 }
 
+.ai-variant-select {
+  background: #14171c;
+  border: 1px solid #2a2e35;
+  border-radius: 4px;
+  color: #9aa0a6;
+  font-family: inherit;
+  font-size: 0.7rem;
+  padding: 0.05rem 0.2rem;
+  margin-left: 0.3rem;
+  cursor: pointer;
+}
+
 .status-select:disabled {
   opacity: 0.6;
   cursor: wait;

@@ -56,6 +56,10 @@ const opsSyncBtn = document.getElementById('ops-sync-btn');
 const opsAccountPills = document.getElementById('ops-account-pills');
 const opsBanner = document.getElementById('ops-banner');
 const opsAlerts = document.getElementById('ops-alerts');
+const staleCleanupToggleStatus = document.getElementById('stale-cleanup-toggle-status');
+const staleCleanupToggleBtn = document.getElementById('stale-cleanup-toggle-btn');
+const staleCleanupTimeoutSpan = document.getElementById('stale-cleanup-timeout');
+let autoCancelStaleOrders = false;
 
 const snapshotsTableBody = document.querySelector('#snapshots-table tbody');
 const refreshSnapshotsBtn = document.getElementById('refresh-snapshots');
@@ -81,6 +85,8 @@ const state = {
   chartToggles: { ma: true, bb: true, osc: true },
   opsAccount: 'all',
   exitPriceBySymbol: new Map(),
+  experimentBySymbol: {},
+  experimentVariantSelection: {},
 };
 
 // ── Tabs ──
@@ -334,6 +340,48 @@ async function loadClaudeExperiment() {
   }
 }
 
+// ── Limpieza automática de órdenes BUY huérfanas/desalineadas ──
+
+function renderStaleCleanupToggle(enabled, timeoutMin) {
+  autoCancelStaleOrders = enabled;
+  if (staleCleanupTimeoutSpan) staleCleanupTimeoutSpan.textContent = timeoutMin;
+  staleCleanupToggleStatus.textContent = enabled
+    ? 'Limpieza automática de órdenes huérfanas/desalineadas: ACTIVADA'
+    : 'Limpieza automática de órdenes huérfanas/desalineadas: apagada (solo se muestran, no se cancelan solas)';
+  staleCleanupToggleStatus.classList.toggle('toggle-on', enabled);
+  staleCleanupToggleStatus.classList.toggle('toggle-off', !enabled);
+  staleCleanupToggleBtn.textContent = enabled ? '⏸ Apagar' : '▶ Activar';
+  staleCleanupToggleBtn.disabled = false;
+}
+
+async function toggleAutoCancelStaleOrders() {
+  const next = !autoCancelStaleOrders;
+  const confirmMessage = next
+    ? 'Esto activa la cancelación automática de órdenes BUY huérfanas/desalineadas (ver detalle arriba) - si la señal sigue siendo BUY ese ciclo, se reemplazan solas con una orden nueva al precio recalculado. ¿Continuar?'
+    : 'Esto apaga la cancelación automática - las órdenes huérfanas/desalineadas solo se van a mostrar para que las cancelés manualmente. ¿Continuar?';
+
+  if (!window.confirm(confirmMessage)) return;
+
+  staleCleanupToggleBtn.disabled = true;
+  try {
+    const res = await fetch('/api/settings/auto-cancel-stale-orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      renderStaleCleanupToggle(data.autoCancelStaleOrders, Number(staleCleanupTimeoutSpan?.textContent) || 60);
+    } else {
+      staleCleanupToggleBtn.disabled = false;
+      window.alert(`Error: ${data.error}`);
+    }
+  } catch (error) {
+    staleCleanupToggleBtn.disabled = false;
+    window.alert(`Error: ${error}`);
+  }
+}
+
 // ── Visibilidad de costo de Claude (Tarea 5) ──
 
 async function loadClaudeUsageBanner() {
@@ -385,6 +433,7 @@ async function loadSettings() {
 
     renderTradingToggle(data.settings.tradingEnabled);
     renderExperimentToggle(data.settings.claudeExperimentEnabled);
+    renderStaleCleanupToggle(data.settings.autoCancelStaleOrders, data.settings.pendingOrderTimeoutMin);
 
     settingsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -1359,6 +1408,47 @@ function applyResumenFilters(rows) {
   });
 }
 
+/**
+ * Celda "IA" de la tab Resumen: por defecto muestra la variante 'A' (producción, con su estado
+ * fresh/stale/not-evaluated). Si el símbolo tuvo alguna vez variantes B/C/D (experimento activo
+ * en algún ciclo pasado), agrega un dropdown para ver qué hubiera recomendado cada una - sin
+ * tener que ir a la sección "Experimentos" de Sistema. La selección por símbolo se guarda en
+ * `state.experimentVariantSelection` para sobrevivir el refresco automático de la tabla (60s).
+ */
+function renderAiCell(row) {
+  const exp = state.experimentBySymbol[row.symbol];
+  const availableVariants = exp ? Object.keys(exp.variants) : [];
+  const hasExperimentVariants = availableVariants.length > 1;
+
+  const storedSelection = state.experimentVariantSelection[row.symbol];
+  const selectedVariant = availableVariants.includes(storedSelection) ? storedSelection : 'A';
+
+  let badge;
+  if (selectedVariant !== 'A' && exp?.variants[selectedVariant]) {
+    const v = exp.variants[selectedVariant];
+    const conf = v.confidence != null ? ` ${Math.round(v.confidence * 100)}%` : '';
+    badge = `<span class="${aiRecClass(v.recommendation)}" title="${v.rationale ?? ''}">${v.recommendation}${conf}</span>`;
+  } else {
+    const parsedAi = parseAiRecommendation(row.aiRecommendation);
+    if (!parsedAi) {
+      badge = '<span class="muted" title="Sin señal BUY técnica este ciclo, o símbolo bloqueado">— no consultado</span>';
+    } else {
+      const conf = row.aiConfidence != null ? ` ${Math.round(row.aiConfidence * 100)}%` : '';
+      badge = parsedAi.state === 'stale'
+        ? `<span class="ai-stale" title="${row.aiRationale ?? ''} (obsoleta: la señal técnica cambió desde la última evaluación)">${parsedAi.rec}${conf} · obsoleta</span>`
+        : `<span class="${aiRecClass(parsedAi.rec)}" title="${row.aiRationale ?? ''}">${parsedAi.rec}${conf} · ${relativeTimeShort(row.aiTs)}</span>`;
+    }
+  }
+
+  if (!hasExperimentVariants) return badge;
+
+  const options = availableVariants
+    .map((v) => `<option value="${v}" ${v === selectedVariant ? 'selected' : ''}>${v}</option>`)
+    .join('');
+  const dropdown = `<select class="ai-variant-select" data-symbol="${row.symbol}" title="Ver qué hubiera recomendado cada variante del experimento (A=control, B=sin señal técnica, C=solo señal técnica, D=orden invertido)">${options}</select>`;
+  return `${badge} ${dropdown}`;
+}
+
 function renderResumenTable() {
   const allRows = getResumenRows();
   const filtered = applyResumenFilters(allRows);
@@ -1386,16 +1476,7 @@ function renderResumenTable() {
           + `<span class="cond-arrow">→</span>`
           + `<span class="cond-badge" title="Venta: ${row.sellConditionLabel ?? ''}">${sellShort}</span>`;
 
-      const parsedAi = parseAiRecommendation(row.aiRecommendation);
-      let aiCell;
-      if (!parsedAi) {
-        aiCell = '<span class="muted" title="Sin señal BUY técnica este ciclo, o símbolo bloqueado">— no consultado</span>';
-      } else {
-        const conf = row.aiConfidence != null ? ` ${Math.round(row.aiConfidence * 100)}%` : '';
-        aiCell = parsedAi.state === 'stale'
-          ? `<span class="ai-stale" title="${row.aiRationale ?? ''} (obsoleta: la señal técnica cambió desde la última evaluación)">${parsedAi.rec}${conf} · obsoleta</span>`
-          : `<span class="${aiRecClass(parsedAi.rec)}" title="${row.aiRationale ?? ''}">${parsedAi.rec}${conf} · ${relativeTimeShort(row.aiTs)}</span>`;
-      }
+      const aiCell = renderAiCell(row);
 
       const entry = row.estimatedEntryPrice != null ? fmtMoney(row.estimatedEntryPrice) : '—';
 
@@ -1429,9 +1510,17 @@ function renderResumenTable() {
 }
 
 resumenTableBody.addEventListener('change', (event) => {
-  const select = event.target.closest('select.status-select');
-  if (!select) return;
-  updateClassification(select.dataset.symbol, select.value, select);
+  const statusSelect = event.target.closest('select.status-select');
+  if (statusSelect) {
+    updateClassification(statusSelect.dataset.symbol, statusSelect.value, statusSelect);
+    return;
+  }
+
+  const variantSelect = event.target.closest('select.ai-variant-select');
+  if (variantSelect) {
+    state.experimentVariantSelection[variantSelect.dataset.symbol] = variantSelect.value;
+    renderResumenTable();
+  }
 });
 
 resumenTableBody.addEventListener('click', (event) => {
@@ -1620,11 +1709,12 @@ backtestGroupFilter.addEventListener('change', loadBacktestGroupView);
 
 async function loadSymbolReports() {
   try {
-    const [statusRes, assessmentsRes, backtestingRes, conditionsRes] = await Promise.all([
+    const [statusRes, assessmentsRes, backtestingRes, conditionsRes, experimentLatestRes] = await Promise.all([
       fetch('/api/trading/status'),
       fetch('/api/assessments'),
       fetch('/api/backtesting/results'),
       fetch('/api/conditions'),
+      fetch('/api/claude-experiment/latest'),
     ]);
 
     const statusData = await statusRes.json();
@@ -1636,6 +1726,8 @@ async function loadSymbolReports() {
     const assessmentsData = await assessmentsRes.json();
     const backtestingData = await backtestingRes.json();
     const conditionsData = await conditionsRes.json();
+    const experimentLatestData = await experimentLatestRes.json();
+    state.experimentBySymbol = experimentLatestData.ok ? experimentLatestData.bySymbol : {};
 
     const { account, positions, signals, hybridSignals, parallelPositions, openOrdersCount } = statusData;
 
@@ -1809,6 +1901,7 @@ saveSettingsBtn.addEventListener('click', saveSettings);
 tradingToggleBtn.addEventListener('click', toggleTradingEnabled);
 experimentToggleBtn.addEventListener('click', toggleClaudeExperiment);
 refreshExperimentBtn.addEventListener('click', loadClaudeExperiment);
+staleCleanupToggleBtn.addEventListener('click', toggleAutoCancelStaleOrders);
 
 riskPresetSelect.addEventListener('change', () => {
   const preset = riskPresetSelect.value;

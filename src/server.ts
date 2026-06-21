@@ -31,11 +31,11 @@ import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
 import { runBacktestForWatchlist, runBacktestForGroup, runBacktestForAllGroups, BACKTEST_GROUPS, BacktestGroup } from './backtestRunner';
-import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled, setClaudeExperimentEnabled } from './services/settingsStore';
+import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled, setClaudeExperimentEnabled, setAutoCancelStaleOrders } from './services/settingsStore';
 import { setupConditionSchema, getSymbolConditions, getMainSymbolConditions } from './services/conditionStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
 import { setupClaudeUsageSchema, getClaudeUsage, getTodayClaudeUsage } from './services/claudeUsageStore';
-import { setupClaudeExperimentSchema, getExperimentSummary, getExperimentDisagreements, getExperimentCost } from './services/claudeExperimentStore';
+import { setupClaudeExperimentSchema, getExperimentSummary, getExperimentDisagreements, getExperimentCost, getLatestVariantsBySymbol } from './services/claudeExperimentStore';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
 import {
   setupSymbolClassificationSchema,
@@ -343,6 +343,30 @@ app.post('/api/settings/claude-experiment-enabled', async (req, res) => {
   }
 });
 
+// Limpieza automática de órdenes BUY huérfanas/desalineadas (ver staleOrders.ts) - flag default
+// false (sin cambios de comportamiento hasta que el usuario lo active explícitamente).
+app.post('/api/settings/auto-cancel-stale-orders', async (req, res) => {
+  const enabled = req.body?.enabled;
+
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ ok: false, error: 'enabled debe ser boolean.' });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSettingsSchema(pool);
+    await setAutoCancelStaleOrders(pool, enabled);
+
+    res.json({ ok: true, autoCancelStaleOrders: enabled, savedAt: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
 app.post('/api/ingest', async (_req, res) => {
   try {
     const summary = await runIngest();
@@ -628,6 +652,23 @@ app.get('/api/claude-experiment/cost', async (req, res) => {
     await setupClaudeExperimentSchema(pool);
     const cost = await getExperimentCost(pool, days);
     res.json({ ok: true, generatedAt: new Date().toISOString(), days, cost });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+// Último set de variantes (A/B/C/D) por símbolo - alimenta el dropdown de la columna IA en la
+// tab Resumen (ver public/app.js#renderResumenTable).
+app.get('/api/claude-experiment/latest', async (req, res) => {
+  const days = parseDaysParam(req.query.days, 30);
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupClaudeExperimentSchema(pool);
+    const bySymbol = await getLatestVariantsBySymbol(pool, days);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), days, bySymbol });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

@@ -172,6 +172,18 @@
 
         <div id="ops-alerts" class="ops-alerts hidden"></div>
 
+        <div class="trading-toggle">
+          <span id="stale-cleanup-toggle-status" class="muted">Limpieza automática de órdenes huérfanas/desalineadas: cargando...</span>
+          <button id="stale-cleanup-toggle-btn" disabled>Cambiar</button>
+        </div>
+        <p class="muted">
+          Cancela sola una orden BUY pendiente si lleva más de <span id="stale-cleanup-timeout">—</span> min abierta, o si el
+          precio que se colocaría hoy para ese símbolo ya es menor que el límite de la orden (p.ej. una orden
+          encolada fuera de horario de mercado cuyo precio quedó por encima del valor actual - sin tolerancia
+          mínima, cualquier diferencia cuenta). Si la señal sigue siendo BUY ese mismo ciclo, se reemplaza
+          automáticamente con una orden nueva al precio recalculado.
+        </p>
+
         <div class="account-pills" id="ops-account-pills">
           <button class="account-pill active" data-account="all">Todas</button>
           <button class="account-pill" data-account="aptos">✅ Aptos</button>

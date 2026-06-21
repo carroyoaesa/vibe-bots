@@ -193,35 +193,8 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
     const account = await getAccount(alpacaClient);
     const positions = await getPositions(alpacaClient);
-    const openOrders = await getOpenOrders(alpacaClient);
-
-    // Detección de órdenes BUY huérfanas (>pending_order_timeout_min pendientes) - una vez
-    // por ciclo de trading (no en el poller de 60s). Por defecto solo loguea/devuelve la
-    // lista (bot_settings.auto_cancel_stale_orders=false) - la UI las muestra para que el
-    // usuario decida cancelarlas manualmente.
-    const { stale: staleOrders } = await cancelStaleOrders(alpacaClient, openOrders, settings.pendingOrderTimeoutMin, settings.autoCancelStaleOrders);
-    if (staleOrders.length > 0) {
-      console.warn(`[runTradingCycle] ${staleOrders.length} orden(es) BUY huérfana(s) detectada(s): ${staleOrders.map((o) => `${o.symbol}(${o.id})`).join(', ')}`);
-    }
-
-    // Refresca la caché de estado de Alpaca (cuenta, posiciones, órdenes abiertas) que usa
-    // /api/trading/status, para que el siguiente poll del dashboard no repita estas llamadas.
-    // Las decisiones de trading de abajo SIEMPRE usan los valores recién obtenidos, no la caché.
-    await Promise.all([
-      setCachedJson(redis, ALPACA_ACCOUNT_CACHE_KEY, account, ALPACA_ACCOUNT_CACHE_TTL_SECONDS),
-      setCachedJson(redis, ALPACA_POSITIONS_CACHE_KEY, positions, ALPACA_POSITIONS_CACHE_TTL_SECONDS),
-      setCachedJson(redis, ALPACA_OPEN_ORDERS_CACHE_KEY, openOrders, ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS),
-    ]).catch((error) => {
-      console.warn('No se pudo refrescar la caché de Alpaca en Redis:', error instanceof Error ? error.message : error);
-    });
-
+    let openOrders = await getOpenOrders(alpacaClient);
     const positionsBySymbol = new Map(positions.map((p) => [p.symbol, p]));
-    const openOrdersBySymbol = new Map<string, AlpacaOrder[]>();
-    for (const order of openOrders) {
-      const list = openOrdersBySymbol.get(order.symbol) ?? [];
-      list.push(order);
-      openOrdersBySymbol.set(order.symbol, list);
-    }
     let openPositionsCount = positions.length;
 
     // Pasada 1: señales técnicas frescas para todo el watchlist (sin tocar la DB todavía),
@@ -236,6 +209,62 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       const buyConditionId = override?.buyExpr ?? pick?.buyConditionId ?? DEFAULT_CONDITION_ID;
       const sellConditionId = override?.sellExpr ?? pick?.sellConditionId ?? DEFAULT_CONDITION_ID;
       signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId, settings.exitMode));
+    }
+
+    // Precio de entrada que se colocaría HOY para cada símbolo con señal BUY vigente - mismo
+    // cálculo que la Pasada 2 (min(estimatedEntryPrice, price)) - usado por cancelStaleOrders
+    // para detectar órdenes BUY pendientes cuyo precio ya no se parece al de hoy (p.ej. una
+    // orden encolada fuera de horario de mercado cuya señal cambió antes de la sesión siguiente).
+    const freshEntryPriceBySymbol = new Map<string, number>();
+    for (let i = 0; i < WATCHLIST.length; i++) {
+      if (signals[i].signal !== 'BUY') continue;
+      const entryPrice = signals[i].estimatedEntryPrice !== null
+        ? Math.min(signals[i].estimatedEntryPrice!, signals[i].price)
+        : signals[i].price;
+      freshEntryPriceBySymbol.set(WATCHLIST[i], entryPrice);
+    }
+
+    // Detección de órdenes BUY huérfanas (>pending_order_timeout_min pendientes) o cuyo precio
+    // límite quedó por encima del precio que se colocaría hoy para ese símbolo (sin tolerancia
+    // mínima - cualquier diferencia cuenta, ver staleOrders.ts) - una vez por ciclo de trading
+    // (no en el poller de 60s). Por defecto solo loguea/devuelve la
+    // lista (bot_settings.auto_cancel_stale_orders=false) - la UI las muestra para que el
+    // usuario decida cancelarlas manualmente. Si está activo, además de cancelarlas en
+    // Alpaca, se sacan de `openOrders` en memoria ANTES de construir `openOrdersBySymbol` -
+    // así, si la señal del símbolo sigue siendo BUY este ciclo, la Pasada 2 las reemplaza con
+    // una orden nueva al precio recalculado en el mismo ciclo (ver cancelStaleOrders).
+    const { stale: staleOrders, cancelled: cancelledStaleOrders } = await cancelStaleOrders(
+      alpacaClient,
+      openOrders,
+      settings.pendingOrderTimeoutMin,
+      settings.autoCancelStaleOrders,
+      freshEntryPriceBySymbol
+    );
+    if (staleOrders.length > 0) {
+      console.warn(`[runTradingCycle] ${staleOrders.length} orden(es) BUY huérfana(s)/desalineada(s) detectada(s): ${staleOrders.map(({ order, reason }) => `${order.symbol}(${order.id}, ${reason})`).join(', ')}`);
+    }
+    if (cancelledStaleOrders.length > 0) {
+      const cancelledIds = new Set(cancelledStaleOrders.map((o) => o.id));
+      openOrders = openOrders.filter((o) => !cancelledIds.has(o.id));
+    }
+
+    // Refresca la caché de estado de Alpaca (cuenta, posiciones, órdenes abiertas) que usa
+    // /api/trading/status, para que el siguiente poll del dashboard no repita estas llamadas.
+    // Ya refleja las cancelaciones de arriba. Las decisiones de trading de abajo SIEMPRE usan
+    // los valores recién obtenidos, no la caché.
+    await Promise.all([
+      setCachedJson(redis, ALPACA_ACCOUNT_CACHE_KEY, account, ALPACA_ACCOUNT_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_POSITIONS_CACHE_KEY, positions, ALPACA_POSITIONS_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_OPEN_ORDERS_CACHE_KEY, openOrders, ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS),
+    ]).catch((error) => {
+      console.warn('No se pudo refrescar la caché de Alpaca en Redis:', error instanceof Error ? error.message : error);
+    });
+
+    const openOrdersBySymbol = new Map<string, AlpacaOrder[]>();
+    for (const order of openOrders) {
+      const list = openOrdersBySymbol.get(order.symbol) ?? [];
+      list.push(order);
+      openOrdersBySymbol.set(order.symbol, list);
     }
 
     // Tarea de eficiencia (2026-06-21): Claude antes se consultaba para los 27 símbolos en
