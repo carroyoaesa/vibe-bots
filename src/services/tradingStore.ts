@@ -81,6 +81,13 @@ export async function setupTradingSchema(pool: Pool): Promise<void> {
   await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_entry_price NUMERIC`);
   await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS adjusted_exit_price NUMERIC`);
   await pool.query(`ALTER TABLE ai_assessments ADD COLUMN IF NOT EXISTS simplified_reason TEXT`);
+
+  // Fase eficiencia/experimento (2026-06-21): `recommendation` pasa de 'buy'|'hold'|'avoid' a
+  // '<recomendacion>-fresh'/'<recomendacion>-stale'/'not-evaluated' (mismo TEXT, sin migración
+  // de tipo - ver `markAssessmentsStale`/`markAssessmentsNotEvaluated` más abajo). Migración de
+  // datos única e idempotente: las filas viejas sin sufijo quedan como '-stale' (no son de
+  // "este ciclo" recién corrido) - el próximo ciclo real las reclasifica según corresponda.
+  await pool.query(`UPDATE ai_assessments SET recommendation = recommendation || '-stale' WHERE recommendation IN ('buy', 'hold', 'avoid')`);
 }
 
 /**
@@ -287,7 +294,8 @@ export async function getRecentOrders(pool: Pool, limit: number): Promise<Recent
 export interface AiAssessmentRecord {
   symbol: string;
   score: number | null;
-  recommendation: 'buy' | 'hold' | 'avoid';
+  /** Formato unificado (Tarea 2): '<buy|hold|avoid>-fresh' al guardar - nunca el valor crudo sin sufijo. */
+  recommendation: string;
   confidence: number | null;
   rationale: string;
   simplifiedReason: string | null;
@@ -325,6 +333,41 @@ export interface LatestAssessmentRow {
   model: string;
   adjustedEntryPrice: number | null;
   adjustedExitPrice: number | null;
+}
+
+/**
+ * Marca como '-stale' (cambiando solo el sufijo) la evaluación 'fresh' MÁS RECIENTE de cada
+ * símbolo - se llama al inicio de cada ciclo, antes de la fase de IA, para que cualquier
+ * evaluación que no se refresque en este ciclo deje de mostrarse como vigente. Si el símbolo
+ * se reevalúa en este mismo ciclo, `saveAssessment` inserta una fila nueva '-fresh' que pasa a
+ * ser la más reciente - esta fila vieja recién marcada '-stale' queda como historial, sin
+ * afectar lo que muestra la UI.
+ */
+export async function markAssessmentsStale(pool: Pool): Promise<void> {
+  await pool.query(`
+    UPDATE ai_assessments a
+    SET recommendation = regexp_replace(a.recommendation, '-fresh$', '-stale')
+    WHERE a.recommendation LIKE '%-fresh'
+      AND a.id = (SELECT a2.id FROM ai_assessments a2 WHERE a2.symbol = a.symbol ORDER BY a2.ts DESC LIMIT 1)
+  `);
+}
+
+/**
+ * Marca como 'not-evaluated' la evaluación más reciente de los símbolos que NO son candidatos
+ * a IA en este ciclo (sin señal BUY técnica, o bloqueados manualmente - ver `tradingRunner.ts`)
+ * - evita que sigan mostrando un '-stale' de una compra vieja que ya no aplica. No toca
+ * símbolos sin ninguna fila previa (la UI ya los muestra como "no consultado" por ausencia).
+ */
+export async function markAssessmentsNotEvaluated(pool: Pool, symbols: string[]): Promise<void> {
+  if (symbols.length === 0) return;
+  await pool.query(
+    `UPDATE ai_assessments a
+     SET recommendation = 'not-evaluated'
+     WHERE a.symbol = ANY($1::text[])
+       AND a.recommendation <> 'not-evaluated'
+       AND a.id = (SELECT a2.id FROM ai_assessments a2 WHERE a2.symbol = a.symbol ORDER BY a2.ts DESC LIMIT 1)`,
+    [symbols]
+  );
 }
 
 export async function getLatestAssessments(pool: Pool): Promise<LatestAssessmentRow[]> {

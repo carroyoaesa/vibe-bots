@@ -1,6 +1,9 @@
+import { Pool } from 'pg';
+import { AxiosInstance } from 'axios';
 import { loadAlpacaConfig, loadPostgresConfig, loadMinioConfig, loadAnthropicConfig, loadRedisConfig } from './config';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, putJsonSnapshot } from './services/storage';
+import { MacroObservation } from './services/fred';
 import {
   createRedisClient,
   setCachedJson,
@@ -28,17 +31,26 @@ import {
   AlpacaAccountSummary,
   AlpacaOrder,
 } from './services/alpaca';
-import { setupTradingSchema, saveSignal, saveOrder, saveAssessment } from './services/tradingStore';
-import { setupSymbolClassificationSchema, getSymbolClassification, classificationToAccountGroup } from './services/symbolClassificationStore';
+import { setupTradingSchema, saveSignal, saveOrder, saveAssessment, markAssessmentsStale, markAssessmentsNotEvaluated } from './services/tradingStore';
+import { setupSymbolClassificationSchema, getAllSymbolClassifications, classificationToAccountGroup } from './services/symbolClassificationStore';
 import { computeSignal, SignalResult } from './strategy/signals';
 import { DEFAULT_CONDITION_ID } from './strategy/conditions';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
 import { setupConditionSchema, getMainSymbolConditions } from './services/conditionStore';
 import { WATCHLIST, ETF_SYMBOLS, MACRO_SERIES } from './watchlist';
-import { createAnthropicClient, assessWatchlist, SymbolAssessment, SymbolAssessmentContext } from './services/claude';
+import {
+  createAnthropicClient,
+  assessWatchlist,
+  assessSymbolVariant,
+  SymbolAssessment,
+  SymbolAssessmentContext,
+  ClaudeExperimentVariant,
+} from './services/claude';
 import { canPlaceBuyOrder, invalidateBuyCheck } from './services/preTradeCheck';
 import { cancelStaleOrders } from './services/staleOrders';
+import { setupClaudeUsageSchema, recordClaudeUsage } from './services/claudeUsageStore';
+import { setupClaudeExperimentSchema, recordExperimentResult } from './services/claudeExperimentStore';
 
 // Velas (OHLC diarias) pedidas por símbolo para calcular la condición activa (Fase 6):
 // suficiente warm-up para SMA50/EMA26/MACD/Bollinger/Stochastic/CCI/Donchian.
@@ -80,6 +92,87 @@ function applyPriceAdjustment(original: number | null, adjusted: number | null |
   return adjusted;
 }
 
+/**
+ * Experimento de sesgo de Claude, limitado a candidatos BUY (Tarea 4, 2026-06-21) - por cada
+ * símbolo evaluado en la llamada de producción, registra la variante 'A' (control = el mismo
+ * resultado de producción, sin llamada extra a Claude) y, solo si `experimentEnabled`, además
+ * corre y registra B/C/D (`assessSymbolVariant`, 1 llamada por variante). Pensado para correr
+ * fire-and-forget desde `runTradingCycle()` - cualquier error en una variante puntual se
+ * loguea y se sigue con las demás, nunca se propaga al ciclo de trading real.
+ */
+async function runClaudeExperiment(
+  pool: Pool,
+  anthropicClient: AxiosInstance,
+  model: string,
+  contexts: SymbolAssessmentContext[],
+  macro: MacroObservation[],
+  productionResults: SymbolAssessment[],
+  experimentEnabled: boolean,
+  dateStr: string
+): Promise<void> {
+  const productionBySymbol = new Map(productionResults.map((r) => [r.symbol, r]));
+  const variants: ClaudeExperimentVariant[] = ['B', 'C', 'D'];
+
+  for (const context of contexts) {
+    const production = productionBySymbol.get(context.symbol);
+    if (!production) continue;
+
+    // Mismo timestamp para las 4 variantes de este símbolo - permite el self-join de
+    // getExperimentDisagreements() sin depender de una ventana de tiempo aproximada.
+    const ts = new Date();
+
+    await recordExperimentResult(pool, {
+      symbol: context.symbol,
+      ts,
+      variant: 'A',
+      recommendation: production.recommendation,
+      score: production.score,
+      confidence: production.confidence,
+      rationale: production.rationale,
+      model,
+      tokensUsed: 0, // ya contabilizado en claude_usage_log por la llamada de producción - no se duplica
+      costEstimateUsd: 0,
+    });
+
+    if (!experimentEnabled) continue;
+
+    const outcomes = await Promise.allSettled(
+      variants.map((variant) => assessSymbolVariant(anthropicClient, model, context, macro, variant))
+    );
+
+    for (let i = 0; i < variants.length; i++) {
+      const variant = variants[i];
+      const outcome = outcomes[i];
+
+      if (outcome.status === 'rejected') {
+        console.warn(`[runClaudeExperiment] Variante ${variant} falló para ${context.symbol}:`, outcome.reason instanceof Error ? outcome.reason.message : outcome.reason);
+        continue;
+      }
+
+      const { assessment, usage } = outcome.value;
+      await recordExperimentResult(pool, {
+        symbol: context.symbol,
+        ts,
+        variant,
+        recommendation: assessment.recommendation,
+        score: assessment.score,
+        confidence: assessment.confidence,
+        rationale: assessment.rationale,
+        model,
+        tokensUsed: usage.inputTokens + usage.outputTokens,
+        costEstimateUsd: usage.costUsd,
+      });
+
+      await recordClaudeUsage(pool, {
+        date: dateStr,
+        totalTokens: usage.inputTokens + usage.outputTokens,
+        costUsd: usage.costUsd ?? 0,
+        source: 'experiment',
+      });
+    }
+  }
+}
+
 export async function runTradingCycle(): Promise<TradingCycleResult> {
   const alpacaConfig = loadAlpacaConfig();
   const postgresConfig = loadPostgresConfig();
@@ -93,6 +186,8 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     await setupSettingsSchema(pool);
     await setupConditionSchema(pool);
     await setupSymbolClassificationSchema(pool);
+    await setupClaudeUsageSchema(pool);
+    await setupClaudeExperimentSchema(pool);
     const settings = await getSettings(pool);
     const symbolConditions = await getMainSymbolConditions(pool);
 
@@ -143,32 +238,53 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId, settings.exitMode));
     }
 
-    // Fase de IA (Claude): gate de optimización de tokens.
-    // - Primera llamada del día (según Redis `claude:last_run_date`): siempre se ejecuta,
-    //   para tener evaluaciones frescas de referencia aunque no haya señales BUY.
-    // - Llamadas siguientes (mismo día): solo si existe al menos 1 señal BUY — es el único
-    //   caso donde Claude puede generar una acción (vetar o confirmar la compra). Para
-    //   señales HOLD/SELL Claude no hace nada, así que no tiene sentido gastar tokens.
-    // Fail-open: si falta ANTHROPIC_API_KEY o falla la llamada, el ciclo sigue sin gating.
-    const CLAUDE_LAST_RUN_KEY = 'claude:last_run_date';
-    const todayStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
-    const lastRunDate = await redis.get(CLAUDE_LAST_RUN_KEY).catch(() => null);
-    const isFirstRunToday = lastRunDate !== todayStr;
-    const hasBuySignals = signals.some((s) => s.signal === 'BUY');
+    // Tarea de eficiencia (2026-06-21): Claude antes se consultaba para los 27 símbolos en
+    // cada ciclo (o, como mínimo, 1 vez por día aunque no hubiera BUYs, vía el viejo gate de
+    // Redis `claude:last_run_date`) - eso multiplicaba el costo sin necesidad real: Claude
+    // SOLO puede actuar (vetar) sobre una señal BUY que ya pasó los demás chequeos, así que
+    // HOLD/SELL no aportan nada evaluados. El filtro de candidatos pasa primero por la
+    // clasificación manual (symbol_classifications) - un símbolo bloqueado nunca coloca una
+    // orden real aunque su señal técnica sea BUY, así que tampoco tiene sentido gastar
+    // tokens evaluándolo.
+    const classifications = await getAllSymbolClassifications(pool);
+    const buyCandidateIndexes: number[] = [];
+    for (let i = 0; i < WATCHLIST.length; i++) {
+      if (signals[i].signal !== 'BUY') continue;
+      if ((classifications[WATCHLIST[i]] ?? 'apto') === 'bloqueado') continue;
+      buyCandidateIndexes.push(i);
+    }
+    const buyCandidateSymbols = buyCandidateIndexes.map((i) => WATCHLIST[i]);
+    const nonCandidateSymbols = WATCHLIST.filter((symbol) => !buyCandidateSymbols.includes(symbol));
+
+    // Invalidación de evaluaciones de IA (Tarea 2, mismo formato '<recomendacion>-<estado>' en
+    // la columna existente ai_assessments.recommendation, sin columnas nuevas): toda evaluación
+    // 'fresh' pasa a 'stale' antes de evaluar de nuevo; los símbolos que ni siquiera son
+    // candidatos este ciclo (HOLD/SELL técnico o bloqueados) bajan directo a 'not-evaluated'.
+    // Si un candidato se reevalúa más abajo, su 'stale' recién puesto queda pisado por la fila
+    // 'fresh' nueva que inserta saveAssessment(); si Claude falla para un candidato, su 'stale'
+    // queda como está (correcto: hay opinión vieja, pero no se reevaluó este ciclo).
+    await markAssessmentsStale(pool);
+    await markAssessmentsNotEvaluated(pool, nonCandidateSymbols);
+
+    console.log(
+      `[runTradingCycle] Fase de IA (Claude): ${buyCandidateSymbols.length} símbolo(s) candidato(s) BUY este ciclo` +
+        (buyCandidateSymbols.length > 0 ? ` -> ${buyCandidateSymbols.join(', ')}` : ' (costo $0 este ciclo)')
+    );
 
     let assessments = new Map<string, SymbolAssessment>();
     let assessmentModel: string | null = null;
+    let claudeExperimentPromise: Promise<void> = Promise.resolve();
+    const todayStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
 
-    if (!isFirstRunToday && !hasBuySignals) {
-      console.log(`Fase de IA (Claude) saltada: ya se ejecutó hoy (${lastRunDate ?? 'n/a'}) y no hay señales BUY`);
-    } else {
+    if (buyCandidateSymbols.length > 0) {
       try {
         const anthropicConfig = loadAnthropicConfig();
         const anthropicClient = createAnthropicClient(anthropicConfig);
 
         const [contexts, macro] = await Promise.all([
           Promise.all(
-            WATCHLIST.map(async (symbol, index): Promise<SymbolAssessmentContext> => {
+            buyCandidateIndexes.map(async (index): Promise<SymbolAssessmentContext> => {
+              const symbol = WATCHLIST[index];
               const signal = signals[index];
               const [fundamentals, news] = await Promise.all([
                 getLatestFundamentals(pool, symbol),
@@ -203,12 +319,34 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         ]);
 
         const model = settings.claudeModel || anthropicConfig.model;
-        const results = await assessWatchlist(anthropicClient, model, contexts, macro);
+        const { assessments: results, usage } = await assessWatchlist(anthropicClient, model, contexts, macro);
         assessments = new Map(results.map((result) => [result.symbol, result]));
         assessmentModel = model;
 
-        // Registrar fecha de última llamada exitosa (TTL 48h para auto-expiración segura)
-        await redis.set(CLAUDE_LAST_RUN_KEY, todayStr, 'EX', 172800).catch(() => {});
+        await recordClaudeUsage(pool, {
+          date: todayStr,
+          totalTokens: usage.inputTokens + usage.outputTokens,
+          costUsd: usage.costUsd ?? 0,
+          source: 'production',
+        });
+
+        // Experimento de sesgo (Tarea 4) - fire-and-forget: no se espera acá (no debe agregar
+        // latencia a la Pasada 2), pero se guarda la promesa (ya con .catch propio, nunca
+        // rechaza) para esperarla recién al final del ciclo, ANTES de cerrar el pool en el
+        // `finally` - si no, una query tardía del experimento podría correr contra un pool
+        // ya cerrado.
+        claudeExperimentPromise = runClaudeExperiment(
+          pool,
+          anthropicClient,
+          model,
+          contexts,
+          macro,
+          results,
+          settings.claudeExperimentEnabled,
+          todayStr
+        ).catch((error) => {
+          console.warn('[runTradingCycle] Experimento de sesgo de Claude falló (no afecta el ciclo de trading):', error instanceof Error ? error.message : error);
+        });
       } catch (error) {
         console.warn('Fase de IA (Claude) omitida en este ciclo:', error instanceof Error ? error.message : error);
       }
@@ -242,17 +380,23 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         // Grupo de cuenta derivado de la clasificación ACTUAL del símbolo (Fase Operaciones
         // multi-cuenta) - solo etiqueta trading_signals/trading_orders.account_group para que
         // la tab "Operaciones" pueda filtrar; NO rutea la orden real a esa cuenta todavía
-        // (sigue siendo la única cuenta de ALPACA_API_KEY/SECRET/BASE_URL).
-        const classification = await getSymbolClassification(pool, symbol);
+        // (sigue siendo la única cuenta de ALPACA_API_KEY/SECRET/BASE_URL). Reusa el mismo
+        // snapshot de clasificaciones que el filtro de candidatos BUY de Claude (arriba), en
+        // vez de pedirlo de nuevo por símbolo.
+        const classification = classifications[symbol] ?? 'apto';
         const accountGroup = classificationToAccountGroup(classification);
 
         const signalId = await saveSignal(pool, signal, 'main', '1Day', accountGroup);
 
         if (assessment && assessmentModel) {
+          // Formato unificado '<recomendacion>-fresh' (Tarea 2) en la misma columna
+          // `ai_assessments.recommendation` - esta es la única evaluación "de este ciclo" para
+          // el símbolo, así que siempre se guarda como fresh; markAssessmentsStale() ya bajó
+          // cualquier fila vieja antes de este punto.
           await saveAssessment(pool, {
             symbol,
             score: assessment.score,
-            recommendation: assessment.recommendation,
+            recommendation: `${assessment.recommendation}-fresh`,
             confidence: assessment.confidence,
             rationale: assessment.rationale,
             simplifiedReason: assessment.simplifiedReason ?? null,
@@ -288,6 +432,11 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
             console.log(`[${symbol}] BUY bloqueado: ${buyCheck.reason}${buyCheck.orderId ? ` (orden pendiente ${buyCheck.orderId})` : ''}`);
             actions.push({ type: 'NO_ACTION', symbol, reason: buyCheck.reason! });
           } else if (assessment?.recommendation === 'avoid') {
+            // `assessment` acá es siempre el resultado EN MEMORIA de la llamada a Claude de
+            // este mismo ciclo (`assessWatchlist`, recomendación cruda 'buy'|'hold'|'avoid'),
+            // nunca el valor persistido con sufijo '-fresh'/'-stale'/'not-evaluated' de
+            // ai_assessments - el gate nunca lee esa columna, así que no puede llegar acá un
+            // valor "viejo" o sin evaluar; no hace falta chequeo extra de estado.
             actions.push({ type: 'AI_BLOCKED', symbol, reason: assessment.rationale });
           } else {
             const positionValue = estimatedOrderValue;
@@ -377,6 +526,11 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     // Fin del ciclo: invalida toda la caché de canPlaceBuyOrder (30s) - el próximo ciclo
     // (cron horario) debe recalcular con datos frescos de Alpaca, no con la decisión cacheada.
     invalidateBuyCheck();
+
+    // Espera al experimento de sesgo de Claude (fire-and-forget respecto de la Pasada 2, ver
+    // más arriba) ANTES de que el `finally` cierre `pool`/`redis` - la promesa ya tiene su
+    // propio `.catch`, así que esto nunca lanza ni afecta `actions`/`signals` del ciclo.
+    await claudeExperimentPromise;
 
     // Snapshot crudo del ciclo en MinIO (Fase 3) - no debe romper el ciclo de trading si falla.
     let snapshotKey: string | null = null;

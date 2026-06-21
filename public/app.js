@@ -7,6 +7,16 @@ const statusBadge = document.getElementById('status-badge');
 
 const tradingToggleStatus = document.getElementById('trading-toggle-status');
 const tradingToggleBtn = document.getElementById('trading-toggle-btn');
+const claudeCostBanner = document.getElementById('claude-cost-banner');
+
+const experimentToggleStatus = document.getElementById('experiment-toggle-status');
+const experimentToggleBtn = document.getElementById('experiment-toggle-btn');
+const experimentUpdated = document.getElementById('experiment-updated');
+const refreshExperimentBtn = document.getElementById('refresh-experiment');
+const experimentSummaryTableBody = document.querySelector('#experiment-summary-table tbody');
+const experimentCostDiv = document.getElementById('experiment-cost');
+const experimentDisagreementsTableBody = document.querySelector('#experiment-disagreements-table tbody');
+let claudeExperimentEnabled = false;
 
 const sidebarHealth = document.getElementById('sidebar-health');
 const sidebarAccount = document.getElementById('sidebar-account');
@@ -205,6 +215,144 @@ async function toggleTradingEnabled() {
   }
 }
 
+// ── Experimento de sesgo de Claude (Tarea 4) ──
+
+function renderExperimentToggle(enabled) {
+  claudeExperimentEnabled = enabled;
+  experimentToggleStatus.textContent = enabled
+    ? 'Experimento (B/C/D): ACTIVADO'
+    : 'Experimento (B/C/D): apagado (solo variante A, sin costo extra)';
+  experimentToggleStatus.classList.toggle('toggle-on', enabled);
+  experimentToggleStatus.classList.toggle('toggle-off', !enabled);
+  experimentToggleBtn.textContent = enabled ? '⏸ Apagar' : '▶ Encender';
+  experimentToggleBtn.disabled = false;
+}
+
+async function toggleClaudeExperiment() {
+  const next = !claudeExperimentEnabled;
+  const confirmMessage = next
+    ? 'Esto activa las variantes B/C/D del experimento: por cada símbolo con señal BUY técnica se hacen 3 llamadas extra a Claude (costo real, ver sección Experimentos). ¿Continuar?'
+    : 'Esto apaga las variantes B/C/D - solo sigue corriendo la variante A (control, sin costo extra). ¿Continuar?';
+
+  if (!window.confirm(confirmMessage)) return;
+
+  experimentToggleBtn.disabled = true;
+  try {
+    const res = await fetch('/api/settings/claude-experiment-enabled', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      renderExperimentToggle(data.claudeExperimentEnabled);
+    } else {
+      experimentToggleBtn.disabled = false;
+      window.alert(`Error: ${data.error}`);
+    }
+  } catch (error) {
+    experimentToggleBtn.disabled = false;
+    window.alert(`Error: ${error}`);
+  }
+}
+
+function fmtPct(value) {
+  return value === null || value === undefined ? '—' : `${Number(value).toFixed(1)}%`;
+}
+
+function renderExperimentSummaryTable(summary) {
+  experimentSummaryTableBody.innerHTML = '';
+  if (summary.length === 0) {
+    experimentSummaryTableBody.innerHTML = '<tr><td colspan="7" class="muted">Sin evaluaciones todavía (necesita al menos 1 señal BUY técnica en el período).</td></tr>';
+    return;
+  }
+  summary.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${row.variant}</strong></td>
+      <td>${row.evaluations}</td>
+      <td>${fmtPct(row.buyRatePct)}</td>
+      <td>${fmtPct(row.holdRatePct)}</td>
+      <td>${fmtPct(row.avoidRatePct)}</td>
+      <td>${row.avgScore !== null ? fmtNum(row.avgScore) : '—'}</td>
+      <td>${row.avgConfidence !== null ? fmtNum(row.avgConfidence) : '—'}</td>
+    `;
+    experimentSummaryTableBody.appendChild(tr);
+  });
+}
+
+function renderExperimentCost(cost) {
+  if (cost.evaluations === 0) {
+    experimentCostDiv.innerHTML = '<span class="muted">Sin gasto del experimento (B/C/D) en el período - flag apagado o sin señales BUY.</span>';
+    return;
+  }
+  const byVariant = cost.byVariant.map((v) => `${v.variant}: $${v.costUsd.toFixed(4)} (${v.evaluations} eval.)`).join(' · ');
+  experimentCostDiv.innerHTML = `<strong>$${cost.totalCostUsd.toFixed(4)}</strong> total · ${cost.totalTokens} tokens · ${byVariant}`;
+}
+
+function renderExperimentDisagreements(disagreements) {
+  experimentDisagreementsTableBody.innerHTML = '';
+  if (disagreements.length === 0) {
+    experimentDisagreementsTableBody.innerHTML = '<tr><td colspan="4" class="muted">Sin desacuerdos A vs B en el período (o experimento apagado).</td></tr>';
+    return;
+  }
+  disagreements.forEach((row) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${row.symbol}</strong></td>
+      <td>${new Date(row.ts).toLocaleString()}</td>
+      <td><span class="${recommendationClass(row.recommendationA)}">${row.recommendationA.toUpperCase()}</span></td>
+      <td><span class="${recommendationClass(row.recommendationB)}">${row.recommendationB.toUpperCase()}</span></td>
+    `;
+    experimentDisagreementsTableBody.appendChild(tr);
+  });
+}
+
+async function loadClaudeExperiment() {
+  refreshExperimentBtn.disabled = true;
+  try {
+    const [summaryRes, costRes, disagreementsRes] = await Promise.all([
+      fetch('/api/claude-experiment/summary?days=7'),
+      fetch('/api/claude-experiment/cost?days=7'),
+      fetch('/api/claude-experiment/disagreements?days=7'),
+    ]);
+    const [summaryData, costData, disagreementsData] = await Promise.all([
+      summaryRes.json(),
+      costRes.json(),
+      disagreementsRes.json(),
+    ]);
+
+    if (summaryData.ok) renderExperimentSummaryTable(summaryData.summary);
+    if (costData.ok) renderExperimentCost(costData.cost);
+    if (disagreementsData.ok) renderExperimentDisagreements(disagreementsData.disagreements);
+
+    experimentUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    experimentSummaryTableBody.innerHTML = `<tr><td colspan="7" class="muted">Error: ${error}</td></tr>`;
+  } finally {
+    refreshExperimentBtn.disabled = false;
+  }
+}
+
+// ── Visibilidad de costo de Claude (Tarea 5) ──
+
+async function loadClaudeUsageBanner() {
+  try {
+    const res = await fetch('/api/claude-usage?days=1');
+    const data = await res.json();
+    if (!data.ok) {
+      claudeCostBanner.textContent = 'Claude hoy: error';
+      return;
+    }
+    const today = data.today;
+    claudeCostBanner.textContent = today
+      ? `Claude hoy: $${today.totalCostUsd.toFixed(2)} · ${today.callsCount} llamada${today.callsCount === 1 ? '' : 's'}`
+      : 'Claude hoy: $0.00 · 0 llamadas';
+  } catch (error) {
+    claudeCostBanner.textContent = `Claude hoy: error (${error})`;
+  }
+}
+
 let riskPresets = {};
 
 function fillRiskInputs(riskProfile) {
@@ -236,6 +384,7 @@ async function loadSettings() {
     claudeModelSelect.value = data.settings.claudeModel || data.models[0].id;
 
     renderTradingToggle(data.settings.tradingEnabled);
+    renderExperimentToggle(data.settings.claudeExperimentEnabled);
 
     settingsUpdated.textContent = `Última actualización: ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -293,6 +442,28 @@ function recommendationClass(recommendation) {
   return 'signal-hold';
 }
 
+/**
+ * Parsea el formato unificado de `ai_assessments.recommendation` (Tarea 2, 2026-06-21):
+ * '<buy|hold|avoid>-<fresh|stale>' o el literal 'not-evaluated'. Devuelve `null` para
+ * 'not-evaluated' (o cualquier valor inesperado) - el caller debe tratarlo como "sin evaluación".
+ */
+function parseAiRecommendation(raw) {
+  if (!raw) return null;
+  const match = /^(buy|hold|avoid)-(fresh|stale)$/.exec(raw);
+  return match ? { rec: match[1], state: match[2] } : null;
+}
+
+/** Texto relativo corto ("hace 5min", "hace 2h") para el timestamp de una evaluación de IA. */
+function relativeTimeShort(ts) {
+  if (!ts) return '';
+  const minutes = Math.round((Date.now() - new Date(ts).getTime()) / 60000);
+  if (minutes < 1) return 'recién';
+  if (minutes < 60) return `hace ${minutes}min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `hace ${hours}h`;
+  return `hace ${Math.round(hours / 24)}d`;
+}
+
 function renderSymbolStats(signal) {
   const stat = (label, value) => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value">${value}</span></div>`;
 
@@ -330,9 +501,16 @@ function renderAssessmentBlock(assessment) {
     return '<p class="muted">Sin evaluación todavía (requiere ANTHROPIC_API_KEY y un ciclo de trading).</p>';
   }
 
+  const parsed = parseAiRecommendation(assessment.recommendation);
+  if (!parsed) {
+    return '<p class="muted">No consultado este ciclo (sin señal BUY técnica, o símbolo bloqueado manualmente).</p>';
+  }
+
+  const staleLabel = parsed.state === 'stale' ? ' <span class="ai-stale-label">(obsoleta - la señal técnica cambió)</span>' : '';
+
   return `
     <p>
-      <span class="${recommendationClass(assessment.recommendation)}">${assessment.recommendation.toUpperCase()}</span>
+      <span class="${recommendationClass(parsed.rec)}">${parsed.rec.toUpperCase()}</span>${staleLabel}
       · Score ${fmtNum(assessment.score)} · Confianza ${assessment.confidence !== null ? fmtNum(assessment.confidence) : '—'}
       · ${new Date(assessment.ts).toLocaleString()}
     </p>
@@ -1048,7 +1226,6 @@ const RESUMEN_TABLE_COLUMNS = [
   { key: 'symbol', type: 'string', getValue: (r) => r.symbol },
   { key: 'type', type: 'string', getValue: (r) => r.type },
   { key: 'estado', type: 'string', getValue: (r) => r.classification },
-  { key: 'bloqueo', type: 'string', getValue: (r) => (r.classification === 'bloqueado' ? '1' : '0') },
   { key: 'signal', type: 'string', getValue: (r) => r.signal },
   { key: 'aiRec', type: 'string', getValue: (r) => r.aiRecommendation ?? '' },
   { key: 'entryPrice', type: 'number', getValue: (r) => r.estimatedEntryPrice ?? null },
@@ -1193,8 +1370,8 @@ function renderResumenTable() {
   if (sorted.length === 0) {
     const hasActiveFilters = Object.values(state.filters).some((value) => value && value !== 'todos');
     resumenTableBody.innerHTML = hasActiveFilters
-      ? '<tr><td colspan="8" class="muted">Sin símbolos para los filtros aplicados. <a href="#" id="clear-filters-link">Limpiar filtros</a></td></tr>'
-      : '<tr><td colspan="8" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
+      ? '<tr><td colspan="7" class="muted">Sin símbolos para los filtros aplicados. <a href="#" id="clear-filters-link">Limpiar filtros</a></td></tr>'
+      : '<tr><td colspan="7" class="muted">Sin señales todavía. Ejecutá la ingesta y un ciclo de trading.</td></tr>';
   } else {
     sorted.forEach((row) => {
       const tr = document.createElement('tr');
@@ -1209,11 +1386,16 @@ function renderResumenTable() {
           + `<span class="cond-arrow">→</span>`
           + `<span class="cond-badge" title="Venta: ${row.sellConditionLabel ?? ''}">${sellShort}</span>`;
 
-      const rec = row.aiRecommendation;
-      const conf = row.aiConfidence != null ? ` ${Math.round(row.aiConfidence * 100)}%` : '';
-      const aiCell = rec
-        ? `<span class="${aiRecClass(rec)}" title="${row.aiRationale ?? ''}">${rec}${conf}</span>`
-        : '<span class="muted">—</span>';
+      const parsedAi = parseAiRecommendation(row.aiRecommendation);
+      let aiCell;
+      if (!parsedAi) {
+        aiCell = '<span class="muted" title="Sin señal BUY técnica este ciclo, o símbolo bloqueado">— no consultado</span>';
+      } else {
+        const conf = row.aiConfidence != null ? ` ${Math.round(row.aiConfidence * 100)}%` : '';
+        aiCell = parsedAi.state === 'stale'
+          ? `<span class="ai-stale" title="${row.aiRationale ?? ''} (obsoleta: la señal técnica cambió desde la última evaluación)">${parsedAi.rec}${conf} · obsoleta</span>`
+          : `<span class="${aiRecClass(parsedAi.rec)}" title="${row.aiRationale ?? ''}">${parsedAi.rec}${conf} · ${relativeTimeShort(row.aiTs)}</span>`;
+      }
 
       const entry = row.estimatedEntryPrice != null ? fmtMoney(row.estimatedEntryPrice) : '—';
 
@@ -1221,7 +1403,6 @@ function renderResumenTable() {
         <td><strong>${row.symbol}</strong></td>
         <td class="muted">${row.type === 'ETF' ? 'ETF' : 'Acción'}</td>
         <td>${renderStatusSelect(row.symbol, row.classification)}</td>
-        <td>${row.classification === 'bloqueado' ? '<span class="badge-bloqueado">🚫 Bloqueado</span>' : '<span class="muted">—</span>'}</td>
         <td><span class="${signalClass(row.signal)}">${row.signal}</span></td>
         <td class="ai-rec-cell">${aiCell}</td>
         <td class="price-cell">${entry}</td>
@@ -1480,6 +1661,7 @@ async function loadSymbolReports() {
         aiRecommendation:   assessment?.recommendation ?? null,
         aiConfidence:       assessment?.confidence ?? null,
         aiRationale:        assessment?.rationale ?? null,
+        aiTs:               assessment?.ts ?? null,
       };
       if (HYBRID_TIER1_SYMBOLS.includes(signal.symbol)) {
         return { ...signal, systemLabel: '1H', chartQuery: '?tf=1H', ...aiFields };
@@ -1625,6 +1807,8 @@ refreshSnapshotsBtn.addEventListener('click', loadSnapshots);
 runBacktestBtn.addEventListener('click', runBacktest);
 saveSettingsBtn.addEventListener('click', saveSettings);
 tradingToggleBtn.addEventListener('click', toggleTradingEnabled);
+experimentToggleBtn.addEventListener('click', toggleClaudeExperiment);
+refreshExperimentBtn.addEventListener('click', loadClaudeExperiment);
 
 riskPresetSelect.addEventListener('change', () => {
   const preset = riskPresetSelect.value;
@@ -1647,6 +1831,10 @@ loadSettings();
 loadClassifications();
 loadSymbolReports();
 loadSnapshots();
+loadClaudeUsageBanner();
+loadClaudeExperiment();
 setInterval(loadHealth, 60000);
 setInterval(loadSymbolReports, 60000);
+setInterval(loadClaudeUsageBanner, 60000);
+setInterval(loadClaudeExperiment, 60000);
 setInterval(loadClassifications, 60000);

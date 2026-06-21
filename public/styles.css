@@ -434,6 +434,23 @@ td.cond-cell {
   color: #9aa0a6;
 }
 
+.ai-stale {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: #6b7280;
+  text-decoration: line-through;
+  text-decoration-color: rgba(107, 114, 128, 0.6);
+}
+
+.ai-stale-label {
+  color: #6b7280;
+  font-size: 0.75rem;
+  font-weight: 400;
+  text-decoration: none;
+}
+
 tr.row-apto {
   background: rgba(46, 204, 113, 0.04);
 }
