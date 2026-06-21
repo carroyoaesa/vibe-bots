@@ -99,6 +99,30 @@ document.querySelectorAll('.tab').forEach((tab) => {
   tab.addEventListener('click', () => activateTab(tab.dataset.tab));
 });
 
+// ── Menú lateral (drawer) en teléfono ──
+const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+const sidebarEl = document.querySelector('.sidebar');
+const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+function closeSidebarDrawer() {
+  sidebarEl.classList.remove('open');
+  sidebarBackdrop.classList.remove('visible');
+  sidebarToggleBtn.setAttribute('aria-expanded', 'false');
+}
+
+function toggleSidebarDrawer() {
+  const isOpen = sidebarEl.classList.toggle('open');
+  sidebarBackdrop.classList.toggle('visible', isOpen);
+  sidebarToggleBtn.setAttribute('aria-expanded', String(isOpen));
+}
+
+sidebarToggleBtn.addEventListener('click', toggleSidebarDrawer);
+sidebarBackdrop.addEventListener('click', closeSidebarDrawer);
+document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', closeSidebarDrawer));
+
+// Botón "Volver a Resumen" en la pestaña Detalle (navegación estilo app nativa en teléfono).
+document.getElementById('detail-back-btn').addEventListener('click', () => activateTab('resumen'));
+
 function renderHealth(data) {
   healthGrid.innerHTML = '';
 

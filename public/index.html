@@ -2,15 +2,25 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1115" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Vibe Bots" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
   <title>Vibe Bots - Dashboard</title>
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
+  <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
   <header>
     <div class="header-top">
       <div class="header-title-group">
+        <button id="sidebar-toggle-btn" class="sidebar-toggle-btn" aria-label="Abrir menú" aria-expanded="false">☰</button>
         <h1>🤖 Vibe Bots</h1>
         <span id="status-badge" class="tag">cargando...</span>
       </div>
@@ -80,7 +90,7 @@
               <option value="HOLD">HOLD</option>
             </select>
           </div>
-          <div class="filter-group">
+          <div class="filter-group filter-search-group">
             <input class="filter-input" id="f-search" type="text" placeholder="Buscar símbolo..." />
           </div>
           <span id="resumen-count" class="muted"></span>
@@ -105,6 +115,7 @@
 
       <!-- DETALLE -->
       <div class="tab-panel" id="tab-detalle">
+        <button id="detail-back-btn" class="detail-back-btn">← Volver a Resumen</button>
         <div id="detail-content">
           <div class="empty-state">Hacé clic en una fila de "Resumen" para ver el detalle de un símbolo.</div>
         </div>

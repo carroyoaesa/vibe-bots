@@ -835,3 +835,464 @@ footer {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   UI MÓVIL / TABLET
+   Detección vía media queries de viewport + puntero (no user-agent
+   sniffing): es el mecanismo estándar y robusto para adaptar el layout
+   según el dispositivo real de acceso. Tres niveles:
+   - Escritorio (> 1024px): layout actual, sin cambios.
+   - Tablet (681–1024px): columna única (ya cubierto arriba por
+     `.main` en 860px) + controles táctiles más grandes.
+   - Teléfono (≤ 680px): "app shell" completo - barra inferior de
+     pestañas, menú lateral tipo drawer, header compacto fijo, y las
+     tablas de uso frecuente (Resumen/Operaciones) se convierten en
+     listas de tarjetas en vez de tablas horizontales.
+   ════════════════════════════════════════════════════════════════════ */
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button, select, .tab, .account-pill, .status-select, .btn-small {
+  touch-action: manipulation;
+}
+
+/* Botón hamburguesa (header) y backdrop del drawer: ocultos en escritorio */
+.sidebar-toggle-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid #2a2e35;
+  border-radius: 8px;
+  color: #e6e6e6;
+  width: 36px;
+  height: 36px;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.sidebar-toggle-btn:hover {
+  background: #1a1d23;
+}
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 199;
+}
+
+.sidebar-backdrop.visible {
+  display: block;
+}
+
+.detail-back-btn {
+  display: none;
+  background: #14171c;
+  border: 1px solid #2a2e35;
+  color: #c7c9cc;
+  align-self: flex-start;
+}
+
+.detail-back-btn:hover {
+  background: #1a1d23;
+  color: #e6e6e6;
+}
+
+/* ── Tablet + teléfono: controles táctiles más grandes ── */
+@media (max-width: 1024px) {
+  button {
+    min-height: 42px;
+    padding: 0.55rem 1rem;
+  }
+
+  .btn-small {
+    min-height: 36px;
+    padding: 0.4rem 0.75rem;
+  }
+
+  .account-pill {
+    padding: 0.45rem 1rem;
+  }
+
+  .status-select {
+    padding: 0.3rem 0.5rem;
+    font-size: 0.82rem;
+  }
+
+  .filter-select,
+  .filter-input,
+  .form-field select,
+  .form-field input {
+    padding: 0.5rem 0.6rem;
+    font-size: 0.92rem;
+  }
+}
+
+/* ── Teléfono: "app shell" ── */
+@media (max-width: 680px) {
+  body {
+    padding: 0 0.75rem calc(76px + env(safe-area-inset-bottom));
+  }
+
+  /* Header compacto, fijo arriba como una top app bar */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 150;
+    background: #0f1115;
+    padding: 0.65rem 0 0.5rem;
+    margin: 0 -0.75rem;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+    border-bottom: 1px solid #2a2e35;
+  }
+
+  header h1 {
+    font-size: 1.15rem;
+  }
+
+  .header-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .header-title-group {
+    justify-content: flex-start;
+  }
+
+  .sidebar-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .trading-toggle {
+    flex-wrap: wrap;
+    font-size: 0.78rem;
+  }
+
+  .trading-toggle button {
+    margin-left: auto;
+  }
+
+  /* Sidebar → drawer deslizable desde la izquierda */
+  .main {
+    margin-top: 0.75rem;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    border-radius: 0;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    overflow-y: auto;
+    padding-top: calc(1rem + env(safe-area-inset-top));
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  /* Pestañas → barra de navegación inferior fija, estilo app nativa */
+  .tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 150;
+    margin: 0;
+    background: #161922;
+    border-top: 1px solid #2a2e35;
+    border-bottom: none;
+    justify-content: space-around;
+    flex-wrap: nowrap;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .tab {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.15rem;
+    min-height: 58px;
+    padding: 0.45rem 0.2rem;
+    font-size: 0.65rem;
+    text-align: center;
+    border-bottom: none;
+    white-space: nowrap;
+  }
+
+  .tab::before {
+    font-size: 1.2rem;
+    line-height: 1;
+  }
+
+  .tab[data-tab="resumen"]::before { content: "📊"; }
+  .tab[data-tab="detalle"]::before { content: "🔍"; }
+  .tab[data-tab="backtest"]::before { content: "🧮"; }
+  .tab[data-tab="operaciones"]::before { content: "💱"; }
+  .tab[data-tab="sistema"]::before { content: "⚙️"; }
+
+  .tab.active {
+    background: rgba(74, 130, 240, 0.08);
+  }
+
+  /* Filtros (Resumen) en grilla de 2 columnas, búsqueda a lo ancho */
+  .filters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem 0.6rem;
+  }
+
+  .filter-group {
+    width: 100%;
+  }
+
+  .filter-search-group {
+    grid-column: 1 / -1;
+  }
+
+  .filter-select,
+  .filter-input {
+    width: 100%;
+  }
+
+  #resumen-count {
+    grid-column: 1 / -1;
+  }
+
+  /* Detalle: botón de volver, estilo navegación de app nativa */
+  .detail-back-btn {
+    display: inline-flex;
+    align-items: center;
+    margin-bottom: 0.25rem;
+  }
+
+  /* ── Tablas de alto uso → tarjetas apiladas ──
+     Patrón sin cambios de JS: las etiquetas se generan vía ::before
+     con contenido estático por nth-child (coincide 1:1 con el thead),
+     y el orden de lectura se reordena vía flex `order` en el <tr>. */
+  #resumen-table,
+  #positions-table,
+  #pending-orders-table,
+  #orders-table {
+    border: 0;
+  }
+
+  #resumen-table thead,
+  #positions-table thead,
+  #pending-orders-table thead,
+  #orders-table thead {
+    display: none;
+  }
+
+  #resumen-table tbody tr,
+  #positions-table tbody tr,
+  #pending-orders-table tbody tr,
+  #orders-table tbody tr {
+    display: flex;
+    flex-direction: column;
+    background: #14171c;
+    border: 1px solid #2a2e35;
+    border-radius: 10px;
+    padding: 0.7rem 0.85rem;
+    margin-bottom: 0.6rem;
+  }
+
+  #resumen-table tbody tr:hover td,
+  #positions-table tbody tr:hover td,
+  #pending-orders-table tbody tr:hover td,
+  #orders-table tbody tr:hover td {
+    background: transparent;
+  }
+
+  #resumen-table tbody td,
+  #positions-table tbody td,
+  #pending-orders-table tbody td,
+  #orders-table tbody td {
+    display: block;
+    position: relative;
+    padding: 0.4rem 0 0.4rem 42%;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    text-align: right;
+    white-space: normal;
+  }
+
+  #resumen-table tbody td:last-child,
+  #positions-table tbody td:last-child,
+  #pending-orders-table tbody td:last-child,
+  #orders-table tbody td:last-child {
+    border-bottom: none;
+  }
+
+  #resumen-table tbody td::before,
+  #positions-table tbody td::before,
+  #pending-orders-table tbody td::before,
+  #orders-table tbody td::before {
+    position: absolute;
+    left: 0;
+    top: 0.4rem;
+    width: 40%;
+    text-align: left;
+    color: #9aa0a6;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  /* Resumen: Símbolo de título (sin label, destacado), resto en orden de lectura útil */
+  #resumen-table tbody td:nth-child(1) {
+    order: 1;
+    padding-left: 0;
+    text-align: left;
+    font-size: 1.05rem;
+  }
+  #resumen-table tbody td:nth-child(4) { order: 2; }
+  #resumen-table tbody td:nth-child(4)::before { content: "Señal"; }
+  #resumen-table tbody td:nth-child(3) { order: 3; }
+  #resumen-table tbody td:nth-child(3)::before { content: "Estado"; }
+  #resumen-table tbody td:nth-child(5) { order: 4; }
+  #resumen-table tbody td:nth-child(5)::before { content: "IA"; }
+  #resumen-table tbody td:nth-child(6) { order: 5; }
+  #resumen-table tbody td:nth-child(6)::before { content: "P. entrada"; }
+  #resumen-table tbody td:nth-child(7) { order: 6; }
+  #resumen-table tbody td:nth-child(7)::before { content: "Condición"; }
+  #resumen-table tbody td:nth-child(2) { order: 7; }
+  #resumen-table tbody td:nth-child(2)::before { content: "Tipo"; }
+
+  /* Posiciones: Símbolo de título, cuenta como subtítulo, botón de acción a lo ancho al final */
+  #positions-table tbody td:nth-child(2) {
+    order: 1;
+    padding-left: 0;
+    text-align: left;
+    font-size: 1.05rem;
+  }
+  #positions-table tbody td:nth-child(1) {
+    order: 2;
+    padding-left: 0;
+    text-align: left;
+  }
+  #positions-table tbody td:nth-child(4) { order: 3; }
+  #positions-table tbody td:nth-child(4)::before { content: "Precio entrada"; }
+  #positions-table tbody td:nth-child(5) { order: 4; }
+  #positions-table tbody td:nth-child(5)::before { content: "Precio actual"; }
+  #positions-table tbody td:nth-child(3) { order: 5; }
+  #positions-table tbody td:nth-child(3)::before { content: "Cantidad"; }
+  #positions-table tbody td:nth-child(6) { order: 6; }
+  #positions-table tbody td:nth-child(6)::before { content: "Valor"; }
+  #positions-table tbody td:nth-child(7) { order: 7; }
+  #positions-table tbody td:nth-child(7)::before { content: "P/L no realizado"; }
+  #positions-table tbody td:nth-child(8) { order: 8; }
+  #positions-table tbody td:nth-child(8)::before { content: "Precio salida est."; }
+  #positions-table tbody td:nth-child(9) {
+    order: 9;
+    padding-left: 0;
+    text-align: stretch;
+    padding-top: 0.5rem;
+  }
+  #positions-table tbody td:nth-child(9) .btn-small {
+    width: 100%;
+    padding: 0.55rem;
+    font-size: 0.85rem;
+  }
+
+  /* Órdenes pendientes: misma idea (Símbolo título, Cuenta subtítulo, acción al final) */
+  #pending-orders-table tbody td:nth-child(2) {
+    order: 1;
+    padding-left: 0;
+    text-align: left;
+    font-size: 1.05rem;
+  }
+  #pending-orders-table tbody td:nth-child(1) {
+    order: 2;
+    padding-left: 0;
+    text-align: left;
+  }
+  #pending-orders-table tbody td:nth-child(3) { order: 3; }
+  #pending-orders-table tbody td:nth-child(3)::before { content: "Lado"; }
+  #pending-orders-table tbody td:nth-child(4) { order: 4; }
+  #pending-orders-table tbody td:nth-child(4)::before { content: "Cantidad"; }
+  #pending-orders-table tbody td:nth-child(5) { order: 5; }
+  #pending-orders-table tbody td:nth-child(5)::before { content: "Límite"; }
+  #pending-orders-table tbody td:nth-child(6) { order: 6; }
+  #pending-orders-table tbody td:nth-child(6)::before { content: "Enviada"; }
+  #pending-orders-table tbody td:nth-child(7) { order: 7; }
+  #pending-orders-table tbody td:nth-child(7)::before { content: "Estado"; }
+  #pending-orders-table tbody td:nth-child(8) {
+    order: 8;
+    padding-left: 0;
+    text-align: stretch;
+    padding-top: 0.5rem;
+  }
+  #pending-orders-table tbody td:nth-child(8) .btn-small {
+    width: 100%;
+    padding: 0.55rem;
+    font-size: 0.85rem;
+  }
+
+  /* Órdenes ejecutadas: Símbolo de título, Fecha como subtítulo */
+  #orders-table tbody td:nth-child(3) {
+    order: 1;
+    padding-left: 0;
+    text-align: left;
+    font-size: 1.05rem;
+  }
+  #orders-table tbody td:nth-child(2) {
+    order: 2;
+    padding-left: 0;
+    text-align: left;
+  }
+  #orders-table tbody td:nth-child(1) {
+    order: 3;
+    padding-left: 0;
+    text-align: left;
+  }
+  #orders-table tbody td:nth-child(4) { order: 4; }
+  #orders-table tbody td:nth-child(4)::before { content: "Lado"; }
+  #orders-table tbody td:nth-child(5) { order: 5; }
+  #orders-table tbody td:nth-child(5)::before { content: "Cantidad"; }
+  #orders-table tbody td:nth-child(6) { order: 6; }
+  #orders-table tbody td:nth-child(6)::before { content: "Tipo"; }
+  #orders-table tbody td:nth-child(7) { order: 7; }
+  #orders-table tbody td:nth-child(7)::before { content: "Estado"; }
+
+  /* Tablas densas (Backtest/Sistema/Experimentos): se mantienen como
+     tablas con scroll horizontal táctil, en vez de tarjetas - son
+     vistas de datos/admin, no de uso a diario en el teléfono. */
+  .table-wrap {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  .health-grid,
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .symbol-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .ops-banner {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .ops-banner .ops-sync-indicator {
+    margin-left: 0;
+  }
+}
