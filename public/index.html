@@ -15,6 +15,7 @@
         <span id="status-badge" class="tag">cargando...</span>
       </div>
       <div class="trading-toggle">
+        <span id="claude-cost-banner" class="muted">Claude hoy: cargando...</span>
         <span id="trading-toggle-status" class="muted">Órdenes a Alpaca: cargando...</span>
         <button id="trading-toggle-btn" disabled>Cambiar</button>
       </div>
@@ -91,7 +92,6 @@
                 <th data-sort-key="symbol">Símbolo</th>
                 <th data-sort-key="type">Tipo</th>
                 <th data-sort-key="estado">Estado</th>
-                <th data-sort-key="bloqueo">Bloqueo</th>
                 <th data-sort-key="signal">Señal</th>
                 <th data-sort-key="aiRec">IA</th>
                 <th data-sort-key="entryPrice">P. entrada</th>
@@ -291,6 +291,49 @@
           </div>
 
           <pre id="settings-result" class="result"></pre>
+        </section>
+
+        <section class="card">
+          <div class="section-header">
+            <h2>Experimentos</h2>
+            <div class="section-actions">
+              <span id="experiment-updated" class="muted"></span>
+              <button id="refresh-experiment">🔄 Actualizar</button>
+            </div>
+          </div>
+          <p class="muted">
+            Variante 'A' (control) es la evaluación normal de producción - se registra siempre, sin costo extra.
+            Variantes B (sin señal técnica), C (solo señal técnica) y D (orden invertido) solo corren con el
+            flag activo, y solo para símbolos con señal BUY técnica (mismo filtro que el gate de producción).
+          </p>
+          <div class="trading-toggle">
+            <span id="experiment-toggle-status" class="muted">Experimento (B/C/D): cargando...</span>
+            <button id="experiment-toggle-btn" disabled>Cambiar</button>
+          </div>
+
+          <h3>Resumen por variante (últimos 7 días)</h3>
+          <div class="table-wrap">
+            <table id="experiment-summary-table">
+              <thead>
+                <tr><th>Variante</th><th>Evaluaciones</th><th>% buy</th><th>% hold</th><th>% avoid</th><th>Score prom.</th><th>Confianza prom.</th></tr>
+              </thead>
+              <tbody><tr><td colspan="7" class="muted">Cargando...</td></tr></tbody>
+            </table>
+          </div>
+
+          <h3>Costo del experimento (B/C/D, últimos 7 días)</h3>
+          <div id="experiment-cost" class="muted">Cargando...</div>
+
+          <h3>Desacuerdos A (control) vs B (sin señal técnica)</h3>
+          <p class="muted">Casos donde Claude cambia de recomendación al no saber que la estrategia ya disparó la señal BUY.</p>
+          <div class="table-wrap">
+            <table id="experiment-disagreements-table">
+              <thead>
+                <tr><th>Símbolo</th><th>Fecha</th><th>A (control)</th><th>B (sin señal)</th></tr>
+              </thead>
+              <tbody><tr><td colspan="4" class="muted">Cargando...</td></tr></tbody>
+            </table>
+          </div>
         </section>
 
         <section class="card">

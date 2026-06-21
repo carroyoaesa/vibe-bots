@@ -47,12 +47,48 @@ export interface SymbolAssessment {
   adjustedExitPrice: number | null;
 }
 
+export interface ClaudeUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  /** Estimado en USD según `CLAUDE_PRICING` - `null` si el modelo no está en la tabla (no se inventa un precio). */
+  costUsd: number | null;
+}
+
 /** Modelos de Claude disponibles para la fase de IA (selector en Configuración, Fase 5). */
 export const CLAUDE_MODEL_OPTIONS: { id: string; label: string }[] = [
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (rápido y económico)' },
   { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (más capaz)' },
   { id: 'claude-opus-4-8', label: 'Claude Opus 4.8 (máxima capacidad)' },
 ];
+
+/**
+ * Precios oficiales por millón de tokens (input/output), USD - fuente: platform.claude.com/docs/en/pricing,
+ * 2026-06. Usados solo para la visibilidad de costo (Fase eficiencia/experimento) - nunca para bloquear
+ * llamadas.
+ */
+const CLAUDE_PRICING: Record<string, { inputPerM: number; outputPerM: number }> = {
+  'claude-haiku-4-5-20251001': { inputPerM: 1.0, outputPerM: 5.0 },
+  'claude-sonnet-4-6': { inputPerM: 3.0, outputPerM: 15.0 },
+  'claude-opus-4-8': { inputPerM: 5.0, outputPerM: 25.0 },
+};
+
+function estimateCostUsd(model: string, inputTokens: number, outputTokens: number): number | null {
+  const pricing = CLAUDE_PRICING[model];
+  if (!pricing) return null;
+  return (inputTokens / 1_000_000) * pricing.inputPerM + (outputTokens / 1_000_000) * pricing.outputPerM;
+}
+
+function extractUsage(model: string, data: any): ClaudeUsage {
+  const inputTokens = Number(data.usage?.input_tokens ?? 0);
+  const outputTokens = Number(data.usage?.output_tokens ?? 0);
+  return {
+    model: data.model ?? model,
+    inputTokens,
+    outputTokens,
+    costUsd: estimateCostUsd(model, inputTokens, outputTokens),
+  };
+}
 
 const RECORD_ASSESSMENTS_TOOL = {
   name: 'record_assessments',
@@ -150,24 +186,7 @@ function buildPrompt(symbols: SymbolAssessmentContext[], macro: MacroObservation
   ].join('\n');
 }
 
-/**
- * Una sola llamada a /v1/messages con tool_choice forzado a record_assessments,
- * para obtener una evaluación estructurada de todo el watchlist en un solo request.
- */
-export async function assessWatchlist(
-  client: AxiosInstance,
-  model: string,
-  symbols: SymbolAssessmentContext[],
-  macro: MacroObservation[]
-): Promise<SymbolAssessment[]> {
-  const { data } = await client.post('/v1/messages', {
-    model,
-    max_tokens: 4096,
-    tools: [RECORD_ASSESSMENTS_TOOL],
-    tool_choice: { type: 'tool', name: 'record_assessments' },
-    messages: [{ role: 'user', content: buildPrompt(symbols, macro) }],
-  });
-
+function parseAssessments(data: any): SymbolAssessment[] {
   const toolUse = (data.content || []).find(
     (block: any) => block.type === 'tool_use' && block.name === 'record_assessments'
   );
@@ -186,6 +205,157 @@ export async function assessWatchlist(
     adjustedEntryPrice: item.adjustedEntryPrice !== undefined && item.adjustedEntryPrice !== null ? Number(item.adjustedEntryPrice) : null,
     adjustedExitPrice: item.adjustedExitPrice !== undefined && item.adjustedExitPrice !== null ? Number(item.adjustedExitPrice) : null,
   }));
+}
+
+export interface AssessWatchlistResult {
+  assessments: SymbolAssessment[];
+  usage: ClaudeUsage;
+}
+
+/**
+ * Una sola llamada a /v1/messages con tool_choice forzado a record_assessments,
+ * para obtener una evaluación estructurada de todo el watchlist en un solo request.
+ */
+export async function assessWatchlist(
+  client: AxiosInstance,
+  model: string,
+  symbols: SymbolAssessmentContext[],
+  macro: MacroObservation[]
+): Promise<AssessWatchlistResult> {
+  const { data } = await client.post('/v1/messages', {
+    model,
+    max_tokens: 4096,
+    tools: [RECORD_ASSESSMENTS_TOOL],
+    tool_choice: { type: 'tool', name: 'record_assessments' },
+    messages: [{ role: 'user', content: buildPrompt(symbols, macro) }],
+  });
+
+  return { assessments: parseAssessments(data), usage: extractUsage(model, data) };
+}
+
+/**
+ * Variantes del experimento de sesgo de Claude (Fase eficiencia/experimento, 2026-06-21):
+ * - 'B' (sin señal técnica): mismo contexto que producción (precio, fundamentales, noticias,
+ *   macro) pero SIN la señal/condición técnica ni los precios estimados algorítmicos - para
+ *   ver si Claude recomendaría "buy" igual sin saber que la estrategia ya disparó esa señal.
+ * - 'C' (solo señal técnica): únicamente la señal/condición técnica + precio - sin
+ *   fundamentales, noticias ni macro - para ver si ese contexto solo alcanza para reproducir
+ *   la recomendación de A.
+ * - 'D' (orden invertido): mismo contenido completo que A (producción), con las secciones del
+ *   prompt en orden inverso (fundamentales/noticias/macro primero, señal técnica al final) -
+ *   para detectar sesgo de orden/anclaje en la respuesta de Claude.
+ * 'A' (control) NO tiene una variante acá - es exactamente la evaluación de producción ya
+ * obtenida por `assessWatchlist`, reusada tal cual (cero llamadas extra a Claude).
+ */
+export type ClaudeExperimentVariant = 'B' | 'C' | 'D';
+
+function buildVariantPrompt(s: SymbolAssessmentContext, macro: MacroObservation[], variant: ClaudeExperimentVariant): string {
+  const macroLines = macro.length > 0
+    ? macro.map((obs) => `- ${obs.seriesId} (${obs.date}): ${obs.value ?? 'n/a'}`).join('\n')
+    : '- Sin datos macro disponibles';
+
+  const fundamentals = s.fundamentals
+    ? `Sector: ${s.fundamentals.sector ?? 'n/a'} | Industria: ${s.fundamentals.industry ?? 'n/a'} | Market cap: ${s.fundamentals.marketCap ?? 'n/a'} | Beta: ${s.fundamentals.beta ?? 'n/a'}`
+    : 'Sin datos fundamentales';
+
+  const news = s.news.length > 0
+    ? s.news.map((item) => `  - (${item.publishedAt.slice(0, 10)}) ${item.headline}`).join('\n')
+    : '  - Sin noticias recientes';
+
+  const conditionLine = s.buyConditionId === s.sellConditionId
+    ? `Condición activa: ${s.buyConditionLabel}`
+    : `Condición de compra: ${s.buyConditionLabel} | Condición de venta: ${s.sellConditionLabel}`;
+
+  const technicalBlock = [
+    `### ${s.symbol} (${s.type}) - datos técnicos`,
+    `Señal técnica: ${s.signal} | ${conditionLine} | Precio: ${s.price} | SMA10: ${s.smaFast ?? 'n/a'} | SMA30: ${s.smaSlow ?? 'n/a'} | RSI14: ${s.rsi ?? 'n/a'} | Momentum10: ${s.momentum ?? 'n/a'}%`,
+    `Precio est. entrada (algorítmico): ${s.estimatedEntryPrice ?? 'n/a'} | Precio est. salida (algorítmico): ${s.estimatedExitPrice ?? 'n/a'}`,
+  ].join('\n');
+
+  const fundamentalsBlock = [
+    `### ${s.symbol} (${s.type}) - fundamentales y noticias`,
+    `Precio: ${s.price}`,
+    `Fundamentales: ${fundamentals}`,
+    'Noticias recientes:',
+    news,
+  ].join('\n');
+
+  const header = 'Eres un analista financiero evaluando una posible operación BUY (cuenta PAPER de Alpaca). ' +
+    'Tu evaluación es experimental (no afecta ninguna orden real) - parte de un estudio sobre qué tan ' +
+    'sensible es tu recomendación al contexto que se te da.';
+
+  const instructions = 'Llama a la tool record_assessments con exactamente 1 evaluación para este símbolo.';
+
+  if (variant === 'B') {
+    return [
+      header,
+      '',
+      'IMPORTANTE: no se te informa la señal técnica ni la condición de análisis técnico activa - evaluá ' +
+        'solo en base a fundamentales, noticias y contexto macro.',
+      '',
+      'Contexto macroeconómico (FRED, EE.UU.):',
+      macroLines,
+      '',
+      fundamentalsBlock,
+      '',
+      instructions,
+    ].join('\n');
+  }
+
+  if (variant === 'C') {
+    return [
+      header,
+      '',
+      'IMPORTANTE: solo se te da la señal técnica y el precio - sin fundamentales, noticias ni contexto macro.',
+      '',
+      technicalBlock,
+      '',
+      instructions,
+    ].join('\n');
+  }
+
+  // 'D': mismo contenido completo que la evaluación de producción, orden de secciones invertido.
+  return [
+    header,
+    '',
+    'Contexto macroeconómico (FRED, EE.UU.):',
+    macroLines,
+    '',
+    fundamentalsBlock,
+    '',
+    technicalBlock,
+    '',
+    instructions,
+  ].join('\n');
+}
+
+export interface AssessVariantResult {
+  assessment: SymbolAssessment;
+  usage: ClaudeUsage;
+}
+
+/** Evalúa UN símbolo con una de las variantes B/C/D del experimento (ver `buildVariantPrompt`). */
+export async function assessSymbolVariant(
+  client: AxiosInstance,
+  model: string,
+  context: SymbolAssessmentContext,
+  macro: MacroObservation[],
+  variant: ClaudeExperimentVariant
+): Promise<AssessVariantResult> {
+  const { data } = await client.post('/v1/messages', {
+    model,
+    max_tokens: 1024,
+    tools: [RECORD_ASSESSMENTS_TOOL],
+    tool_choice: { type: 'tool', name: 'record_assessments' },
+    messages: [{ role: 'user', content: buildVariantPrompt(context, macro, variant) }],
+  });
+
+  const [assessment] = parseAssessments(data);
+  if (!assessment) {
+    throw new Error(`Claude no devolvió una evaluación para la variante ${variant} de ${context.symbol}`);
+  }
+
+  return { assessment, usage: extractUsage(model, data) };
 }
 
 export async function verifyAnthropic(client: AxiosInstance, model: string): Promise<{ model: string; reply: string }> {

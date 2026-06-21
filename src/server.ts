@@ -31,9 +31,11 @@ import { RISK_PROFILE_PRESETS } from './strategy/config';
 import { WATCHLIST, ETF_SYMBOLS } from './watchlist';
 import { setupBacktestSchema, getLatestBacktestRun } from './services/backtestStore';
 import { runBacktestForWatchlist, runBacktestForGroup, runBacktestForAllGroups, BACKTEST_GROUPS, BacktestGroup } from './backtestRunner';
-import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled } from './services/settingsStore';
+import { setupSettingsSchema, getSettings, saveSettings, setTradingEnabled, setClaudeExperimentEnabled } from './services/settingsStore';
 import { setupConditionSchema, getSymbolConditions, getMainSymbolConditions } from './services/conditionStore';
 import { CLAUDE_MODEL_OPTIONS } from './services/claude';
+import { setupClaudeUsageSchema, getClaudeUsage, getTodayClaudeUsage } from './services/claudeUsageStore';
+import { setupClaudeExperimentSchema, getExperimentSummary, getExperimentDisagreements, getExperimentCost } from './services/claudeExperimentStore';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
 import {
   setupSymbolClassificationSchema,
@@ -317,6 +319,30 @@ app.post('/api/settings/trading-enabled', async (req, res) => {
   }
 });
 
+// Tarea 4 (experimento de sesgo de Claude) - flag default false (ver setupSettingsSchema);
+// activarlo/desactivarlo es siempre una acción manual y explícita del usuario, nunca automática.
+app.post('/api/settings/claude-experiment-enabled', async (req, res) => {
+  const enabled = req.body?.enabled;
+
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ ok: false, error: 'enabled debe ser boolean.' });
+    return;
+  }
+
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupSettingsSchema(pool);
+    await setClaudeExperimentEnabled(pool, enabled);
+
+    res.json({ ok: true, claudeExperimentEnabled: enabled, savedAt: new Date().toISOString() });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
 app.post('/api/ingest', async (_req, res) => {
   try {
     const summary = await runIngest();
@@ -533,6 +559,75 @@ app.get('/api/assessments', async (_req, res) => {
     await setupTradingSchema(pool);
     const assessments = await getLatestAssessments(pool);
     res.json({ ok: true, generatedAt: new Date().toISOString(), assessments });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+// ── Visibilidad de costo de Claude (Tarea 5) - solo lectura, sin ningún bloqueo ────────────
+
+function parseDaysParam(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 365) : fallback;
+}
+
+app.get('/api/claude-usage', async (req, res) => {
+  const days = parseDaysParam(req.query.days, 30);
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupClaudeUsageSchema(pool);
+    const [today, history] = await Promise.all([getTodayClaudeUsage(pool), getClaudeUsage(pool, days)]);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), days, today, history });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+// ── Experimento de sesgo de Claude (Tarea 4) - solo lectura ─────────────────────────────────
+
+app.get('/api/claude-experiment/summary', async (req, res) => {
+  const days = parseDaysParam(req.query.days, 7);
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupClaudeExperimentSchema(pool);
+    const summary = await getExperimentSummary(pool, days);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), days, summary });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/claude-experiment/disagreements', async (req, res) => {
+  const days = parseDaysParam(req.query.days, 7);
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupClaudeExperimentSchema(pool);
+    const disagreements = await getExperimentDisagreements(pool, days);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), days, disagreements });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    await pool.end();
+  }
+});
+
+app.get('/api/claude-experiment/cost', async (req, res) => {
+  const days = parseDaysParam(req.query.days, 7);
+  const pool = createPostgresPool(loadPostgresConfig());
+
+  try {
+    await setupClaudeExperimentSchema(pool);
+    const cost = await getExperimentCost(pool, days);
+    res.json({ ok: true, generatedAt: new Date().toISOString(), days, cost });
   } catch (error) {
     res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   } finally {

@@ -36,6 +36,11 @@ export async function setupSettingsSchema(pool: Pool): Promise<void> {
   // y si esa cancelación corre automática (default false: solo se detecta/loguea/muestra en UI).
   await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS pending_order_timeout_min INTEGER NOT NULL DEFAULT 60`);
   await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS auto_cancel_stale_orders BOOLEAN NOT NULL DEFAULT FALSE`);
+
+  // Fase eficiencia/experimento (2026-06-21): apagado por defecto - con el flag en false,
+  // runTradingCycle() solo corre la variante 'A' (evaluación normal de producción) para los
+  // candidatos BUY; con el flag en true, además corre B/C/D (ver tradingRunner.ts/claude.ts).
+  await pool.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS claude_experiment_enabled BOOLEAN NOT NULL DEFAULT FALSE`);
 }
 
 export interface BotSettings {
@@ -46,11 +51,12 @@ export interface BotSettings {
   exitMode: ExitMode;
   pendingOrderTimeoutMin: number;
   autoCancelStaleOrders: boolean;
+  claudeExperimentEnabled: boolean;
 }
 
 export async function getSettings(pool: Pool): Promise<BotSettings> {
   const result = await pool.query(
-    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, exit_mode, pending_order_timeout_min, auto_cancel_stale_orders
+    `SELECT risk_preset, position_size_pct, stop_loss_pct, take_profit_pct, max_positions, claude_model, trading_enabled, exit_mode, pending_order_timeout_min, auto_cancel_stale_orders, claude_experiment_enabled
      FROM bot_settings WHERE id = 1`
   );
 
@@ -69,6 +75,7 @@ export async function getSettings(pool: Pool): Promise<BotSettings> {
     exitMode: row.exit_mode,
     pendingOrderTimeoutMin: Number(row.pending_order_timeout_min),
     autoCancelStaleOrders: row.auto_cancel_stale_orders,
+    claudeExperimentEnabled: row.claude_experiment_enabled,
   };
 }
 
@@ -97,6 +104,13 @@ export async function saveSettings(pool: Pool, settings: Pick<BotSettings, 'risk
 export async function setTradingEnabled(pool: Pool, enabled: boolean): Promise<void> {
   await pool.query(
     `UPDATE bot_settings SET trading_enabled = $1, updated_at = NOW() WHERE id = 1`,
+    [enabled]
+  );
+}
+
+export async function setClaudeExperimentEnabled(pool: Pool, enabled: boolean): Promise<void> {
+  await pool.query(
+    `UPDATE bot_settings SET claude_experiment_enabled = $1, updated_at = NOW() WHERE id = 1`,
     [enabled]
   );
 }
