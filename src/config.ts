@@ -54,6 +54,16 @@ export interface WebConfig {
   grafanaPublicUrl?: string;
 }
 
+export interface EmailAlertConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  password: string;
+  from: string;
+  to: string;
+}
+
 const secureEnvPath = path.resolve(process.cwd(), 'secure', 'keys.env');
 
 if (fs.existsSync(secureEnvPath)) {
@@ -171,4 +181,26 @@ export function loadWebConfig(): WebConfig {
   const grafanaPublicUrl = process.env.GRAFANA_PUBLIC_URL || undefined;
 
   return { port, grafanaPublicUrl };
+}
+
+/**
+ * Alertas por email (BUY/SELL ejecutados) - feature opcional: si falta cualquiera de
+ * SMTP_HOST/SMTP_USER/SMTP_PASSWORD/ALERT_EMAIL_TO devuelve null (no lanza) para que
+ * runTradingCycle() pueda omitir el envío en silencio en vez de fallar el ciclo.
+ */
+export function loadEmailAlertConfig(): EmailAlertConfig | null {
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const password = process.env.SMTP_PASSWORD;
+  const to = process.env.ALERT_EMAIL_TO;
+
+  if (!host || !user || !password || !to) {
+    return null;
+  }
+
+  const port = Number(process.env.SMTP_PORT || '587');
+  const secure = process.env.SMTP_SECURE === 'true';
+  const from = process.env.SMTP_FROM || user;
+
+  return { host, port, secure, user, password, from, to };
 }

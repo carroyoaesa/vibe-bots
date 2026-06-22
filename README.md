@@ -55,6 +55,7 @@ El proyecto está configurado para usar servicios nativos instalados en la misma
 - `npm run backtest` - corre las 144 combinaciones de condiciones (12 compra × 12 venta, Fase 7) sobre el histórico actual para los 27 símbolos del watchlist, elige el par ganador de cada símbolo y persiste el resultado en `symbol_conditions` (ver "Backtesting" y "Fase 7" más abajo). Es la corrida "legacy" (sin segmentar); ver "Fase 10" para la variante segmentada por clasificación (`POST /api/backtest/run?group=...`, solo vía dashboard/API, sin script propio todavía).
 - `npm run backfill-history` - (opcional, una sola vez, no corrido aún) extiende el histórico diario de `market_bars` de ~150 a ~2100 días (~5.8 años) para backtests con más regímenes de mercado.
 - `npm run backfill-1h` - (opcional, no corrido aún) descarga histórico de velas horarias (`market_bars` con `timeframe='1Hour'`) vía `src/backfillHourlyHistory.ts`. Alimenta el pick informativo 1H de `backtestRunner.ts` (ver nota en "Backtesting") - hoy no afecta señales/órdenes reales.
+- `npm run test-email` - envía un email de prueba con la configuración SMTP de `secure/keys.env` (ver "Alertas por email" más abajo), sin esperar a que ocurra un BUY/SELL real.
 - `npm run web` - levantar el dashboard web en primer plano, en `http://0.0.0.0:4000`
 - `npm run web:start` / `npm run web:stop` - levantar/detener el dashboard web en background (ver `scripts/`)
 - `npm run status` - ver el estado de los servicios nativos (Postgres/Redis/MinIO) y del dashboard web
@@ -112,6 +113,17 @@ ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 
 # Dashboard web
 WEB_PORT=4000
+
+# Alertas por email (Fase 12) - opcional, fail-open: si falta alguna, no se envían emails
+# pero el ciclo de trading sigue funcionando igual. SMTP genérico (Gmail con contraseña de
+# aplicación, Outlook, Fastmail, o un relay de SendGrid/Mailgun/Resend/SES).
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=
+ALERT_EMAIL_TO=
 ```
 
 ## Diagnóstico (`npm run dev`)
@@ -218,6 +230,16 @@ Las señales técnicas operan sobre cierres **diarios** (`market_bars`), por lo 
 - El frontend (`public/`) integra estos datos en los tabs "Resumen", "Detalle" y "Operaciones" del dashboard (ver "Dashboard web" más abajo) con un botón "Ejecutar ciclo de trading" que pide confirmación antes de llamar a `POST /api/trading/run`.
 
 > ⚠️ Tanto `npm run trade` como el botón del dashboard y `POST /api/trading/run` colocan órdenes reales (con dinero simulado) en la cuenta **paper** de Alpaca, salvo que el mercado esté cerrado (ver guard arriba). No hay modo "solo simulación" adicional en esta fase: el "paper" de Alpaca ya es el entorno de prueba.
+
+## Alertas por email (2026-06-22)
+
+`runTradingCycle()` (`src/tradingRunner.ts`) envía un email al final del ciclo si la Pasada 2 ejecutó al menos una orden BUY (`OPEN_POSITION`) o SELL (`CLOSE_POSITION`) real - no por señales técnicas BUY/SELL que terminaron bloqueadas/omitidas (`NO_ACTION`/`AI_BLOCKED`/`SKIPPED`/`TRADING_DISABLED`). Un solo email por ciclo agrupa todas las órdenes ejecutadas ese ciclo (asunto `Vibe Bots: N BUY / M SELL`).
+
+- **Contenido** (HTML, con fallback de texto plano), por cada orden ejecutada: símbolo, cantidad, precio, id de orden Alpaca, condición de compra/venta activa y su `reason` con valores de indicador, SMA rápida/lenta, RSI, momentum, precios estimados de entrada/salida, la evaluación de IA de Claude de ese mismo ciclo si la hubo (recomendación/score/confianza/motivo - **solo en BUY**, la fase de IA nunca evalúa SELL) y un **gráfico PNG embebido** con el mismo estilo que la sección "Detalle" del dashboard (precio + overlays de la condición activa + líneas de entrada/salida estimadas).
+- **Render del gráfico** (`src/services/chartImage.ts`, `chartjs-node-canvas` + `canvas`): 100% local, sin servicios externos. Requirió instalar paquetes de sistema (`libcairo2-dev`, `libpango1.0-dev`, `libjpeg-dev`, `librsvg2-dev`, `libgif-dev`) para compilar el módulo nativo `canvas` - decisión confirmada explícitamente por el usuario (alternativas consideradas: un servicio externo tipo QuickChart.io, o solo texto + link al dashboard sin imagen). `src/strategy/chartOverlays.ts` es un puerto a TypeScript de `CONDITION_CHART_CONFIG`/`mergeConditionChartConfig` (`public/app.js`) - duplicado a propósito porque el frontend no tiene bundler ni módulo compartible con el backend.
+- **Config** (`src/config.ts#loadEmailAlertConfig`, `src/services/email.ts`): SMTP genérico vía `nodemailer` (sirve para Gmail con contraseña de aplicación, Outlook, Fastmail, o un relay SMTP de SendGrid/Mailgun/Resend/SES) - variables `SMTP_HOST`/`SMTP_PORT`/`SMTP_SECURE`/`SMTP_USER`/`SMTP_PASSWORD`/`SMTP_FROM`/`ALERT_EMAIL_TO` (`secure/keys.env`, ver `.env.example`). `ALERT_EMAIL_TO` acepta varios destinatarios separados por coma. Configurado en producción con Gmail SMTP.
+- **Opcional y fail-open**: si falta `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD`/`ALERT_EMAIL_TO`, `loadEmailAlertConfig()` devuelve `null` y el envío se omite en silencio - el ciclo de trading nunca depende de esto. Si el envío falla (credenciales inválidas, SMTP caído) o el render de un gráfico puntual falla, se loguea el error/se manda ese bloque sin imagen y el ciclo sigue normalmente (mismo patrón fail-open que el snapshot de MinIO).
+- **Fuera de alcance de esta fase** (ver "Próximas fases" #14): no cubre `AI_BLOCKED`, ajustes de precio de IA descartados, fallos de la capa de IA/ingesta, ni canales alternativos (Telegram/Slack).
 
 ## Capa de IA (Claude)
 
@@ -557,6 +579,6 @@ Ideas de evolución, no implementadas todavía - priorizar según valor/esfuerzo
 11. **Tests automatizados**: no hay suite de tests; agregar unit tests para `strategy/` (señales, backtest, `applyPriceAdjustment`, `preTradeCheck`) e integración para `settingsStore`/`tradingRunner`.
 12. **Historial de configuración**: `bot_settings` es una fila singleton sin auditoría; agregar una tabla `bot_settings_history` para ver cuándo/quién cambió el perfil de riesgo, modelo de Claude o cualquiera de los 3 interruptores.
 13. **Watchlist dinámica**: `WATCHLIST` es una constante en código (`src/watchlist.ts`); permitir agregar/quitar símbolos desde el dashboard, igual que `bot_settings`.
-14. **Alertas**: notificaciones (email/Telegram/Slack) ante `AI_BLOCKED`, ajustes de precio de IA descartados por exceder ±10%, fallos repetidos de la capa de IA/ingesta, o sync de cuenta fallido en "Operaciones".
+14. **Alertas**: ✅ email implementado (2026-06-22) para BUY/SELL REALMENTE ejecutados (`OPEN_POSITION`/`CLOSE_POSITION`) - ver "Alertas por email" más abajo. Pendiente: Telegram/Slack como canal alternativo, y extender el disparador a `AI_BLOCKED`, ajustes de precio de IA descartados por exceder ±10%, fallos repetidos de la capa de IA/ingesta, o sync de cuenta fallido en "Operaciones".
 15. **Revisar el volumen real de llamadas a Claude por la cadencia de 5 min**: el ciclo de trading corre cada 5 minutos (no cada hora, corregido en esta misma revisión) y la Fase 11 quitó el viejo gate de "1 vez por día" para la IA - un candidato BUY persistente podría generar muchas llamadas el mismo día. Revisar `GET /api/claude-usage` en un día con BUYs activos; si el volumen es alto, la corrección sería un throttle de "no re-preguntar lo mismo en una ventana corta" (no un corte por presupuesto, ver regla en "Fase 11").
 16. **Ícono PWA en iOS**: el `icon.svg` del dashboard responsive (capa móvil agregada en esta misma revisión) se ve en Android/Chrome al agregar a la pantalla de inicio, pero iOS Safari requiere un `apple-touch-icon` en PNG - generar uno si se quiere paridad completa.

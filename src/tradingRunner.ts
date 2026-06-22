@@ -1,8 +1,9 @@
 import { Pool } from 'pg';
 import { AxiosInstance } from 'axios';
-import { loadAlpacaConfig, loadPostgresConfig, loadMinioConfig, loadAnthropicConfig, loadRedisConfig } from './config';
+import { loadAlpacaConfig, loadPostgresConfig, loadMinioConfig, loadAnthropicConfig, loadRedisConfig, loadEmailAlertConfig } from './config';
 import { createPostgresPool } from './services/db';
 import { createMinioClient, putJsonSnapshot } from './services/storage';
+import { sendTradeAlertEmail, TradeAlertEntry } from './services/email';
 import { MacroObservation } from './services/fred';
 import {
   createRedisClient,
@@ -34,7 +35,7 @@ import {
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment, markAssessmentsStale, markAssessmentsNotEvaluated } from './services/tradingStore';
 import { setupSymbolClassificationSchema, getAllSymbolClassifications, classificationToAccountGroup } from './services/symbolClassificationStore';
 import { computeSignal, SignalResult } from './strategy/signals';
-import { DEFAULT_CONDITION_ID } from './strategy/conditions';
+import { DEFAULT_CONDITION_ID, OhlcBar } from './strategy/conditions';
 import { MULTI_CONDITION_OVERRIDES } from './strategy/multiConditionOverrides';
 import { setupSettingsSchema, getSettings } from './services/settingsStore';
 import { setupConditionSchema, getMainSymbolConditions } from './services/conditionStore';
@@ -200,8 +201,12 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     // Pasada 1: señales técnicas frescas para todo el watchlist (sin tocar la DB todavía),
     // así quedan disponibles para la fase de IA antes de guardar/ejecutar nada.
     const signals: SignalResult[] = [];
+    // Velas usadas para cada señal este ciclo - se reusan (sin volver a pedirlas) para el
+    // gráfico adjunto a la alerta de email (Fase 12) si el símbolo termina en BUY/SELL.
+    const barsBySymbol = new Map<string, OhlcBar[]>();
     for (const symbol of WATCHLIST) {
       const bars = await getRecentOhlcBars(pool, symbol, BARS_LOOKBACK);
+      barsBySymbol.set(symbol, bars);
       const pick = symbolConditions.get(symbol);
       const override = MULTI_CONDITION_OVERRIDES[symbol];
       // Fase 8: el override de 2-3 condiciones (si existe) tiene precedencia sobre el pick
@@ -382,6 +387,9 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     }
 
     const actions: TradingAction[] = [];
+    // Entradas para la alerta por email (Fase 12) - solo BUY/SELL REALMENTE ejecutados
+    // (OPEN_POSITION/CLOSE_POSITION), no señales técnicas bloqueadas/omitidas.
+    const tradeAlertEntries: TradeAlertEntry[] = [];
 
     // Pasada 2: persistencia + ejecución, con gating de IA sobre señales BUY.
     for (let index = 0; index < WATCHLIST.length; index++) {
@@ -515,6 +523,18 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
               invalidateBuyCheck(accountGroup, symbol);
               actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id });
+              tradeAlertEntries.push({
+                type: 'BUY',
+                symbol,
+                qty,
+                price: entryPrice,
+                orderId: order.id,
+                signal,
+                bars: barsBySymbol.get(symbol) ?? [],
+                ai: assessment
+                  ? { recommendation: assessment.recommendation, score: assessment.score, confidence: assessment.confidence, rationale: assessment.rationale }
+                  : null,
+              });
               openPositionsCount += 1;
             }
           }
@@ -542,6 +562,16 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
             invalidateBuyCheck(accountGroup, symbol);
             actions.push({ type: 'CLOSE_POSITION', symbol, qty: position.qty, alpacaOrderId: closeOrder.id });
+            tradeAlertEntries.push({
+              type: 'SELL',
+              symbol,
+              qty: position.qty,
+              price: signal.price,
+              orderId: closeOrder.id,
+              signal,
+              bars: barsBySymbol.get(symbol) ?? [],
+              ai: null, // la fase de IA (Fase 11) solo evalúa candidatos BUY, nunca SELL
+            });
             openPositionsCount -= 1;
           }
         } else {
@@ -560,6 +590,21 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     // más arriba) ANTES de que el `finally` cierre `pool`/`redis` - la promesa ya tiene su
     // propio `.catch`, así que esto nunca lanza ni afecta `actions`/`signals` del ciclo.
     await claudeExperimentPromise;
+
+    // Alerta por email (Fase 12) - best-effort, igual patrón que el snapshot de MinIO de
+    // abajo: si no hay SMTP configurado (loadEmailAlertConfig devuelve null) o no hubo
+    // ningún BUY/SELL ejecutado este ciclo, no se envía nada. Incluye condiciones técnicas,
+    // motivo de IA (solo BUY) y un gráfico PNG del símbolo por entrada.
+    if (tradeAlertEntries.length > 0) {
+      try {
+        const emailConfig = loadEmailAlertConfig();
+        if (emailConfig) {
+          await sendTradeAlertEmail(emailConfig, tradeAlertEntries);
+        }
+      } catch (error) {
+        console.error('No se pudo enviar la alerta de email del ciclo de trading:', error instanceof Error ? error.message : error);
+      }
+    }
 
     // Snapshot crudo del ciclo en MinIO (Fase 3) - no debe romper el ciclo de trading si falla.
     let snapshotKey: string | null = null;
