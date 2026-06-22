@@ -1,6 +1,7 @@
 const healthGrid = document.getElementById('health-grid');
 const healthUpdated = document.getElementById('health-updated');
 const refreshHealthBtn = document.getElementById('refresh-health');
+const grafanaContainer = document.getElementById('grafana-container');
 const runIngestBtn = document.getElementById('run-ingest');
 const ingestResult = document.getElementById('ingest-result');
 const statusBadge = document.getElementById('status-badge');
@@ -1916,6 +1917,26 @@ async function runBacktest() {
   }
 }
 
+async function loadGrafana() {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+
+    if (data.grafanaPublicUrl) {
+      grafanaContainer.innerHTML = '';
+      const iframe = document.createElement('iframe');
+      iframe.src = data.grafanaPublicUrl;
+      iframe.title = 'Vibe Bots - Infra (Grafana)';
+      iframe.loading = 'lazy';
+      grafanaContainer.appendChild(iframe);
+    } else {
+      grafanaContainer.innerHTML = '<p class="muted">Configura GRAFANA_PUBLIC_URL para mostrar el dashboard aquí.</p>';
+    }
+  } catch (error) {
+    grafanaContainer.innerHTML = `<p class="muted">Error al cargar configuración de Grafana: ${error}</p>`;
+  }
+}
+
 refreshHealthBtn.addEventListener('click', loadHealth);
 runIngestBtn.addEventListener('click', runIngest);
 runTradeBtn.addEventListener('click', runTradingCycle);
@@ -1944,6 +1965,7 @@ setupSortableTable('resumen-table', resumenSortState, renderResumenTable);
 setupSortableTable('conditions-table', conditionsSortState, renderConditionsTable);
 
 loadHealth();
+loadGrafana();
 loadSettings();
 loadClassifications();
 loadSymbolReports();

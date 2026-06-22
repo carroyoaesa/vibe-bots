@@ -4,9 +4,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 echo "=== Servicios nativos ==="
-for svc in postgresql redis-server minio grafana-server; do
+for svc in postgresql redis-server minio grafana-server prometheus prometheus-node-exporter prometheus-postgres-exporter prometheus-redis-exporter; do
   status=$(systemctl is-active "$svc" 2>/dev/null || echo "desconocido")
-  printf "  %-16s %s\n" "$svc" "$status"
+  printf "  %-30s %s\n" "$svc" "$status"
 done
 
 echo

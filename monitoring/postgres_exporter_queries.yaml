@@ -1,0 +1,63 @@
+# Query custom de postgres_exporter (Fase 13) - tamaño de las tablas más relevantes
+# de vibe-bots (las que crecen sin política de retención todavía, ver "Pendientes
+# conocidos" en CLAUDE.md). Copiar a /etc/prometheus-postgres-exporter/queries.yaml en
+# la VM y referenciar con --extend.query-path en /etc/default/prometheus-postgres-exporter.
+pg_vibebots_table_sizes:
+  query: |
+    SELECT relname AS table, pg_total_relation_size(relid) AS size_bytes
+    FROM pg_catalog.pg_statio_user_tables
+    WHERE relname IN (
+      'market_bars', 'trading_signals', 'trading_orders',
+      'claude_usage_log', 'claude_gate_experiment', 'ai_assessments'
+    )
+  metrics:
+    - table:
+        usage: "LABEL"
+        description: "Nombre de la tabla"
+    - size_bytes:
+        usage: "GAUGE"
+        description: "Tamaño total (datos + índices) en bytes"
+
+# postgres_exporter no trae un collector de pg_stat_statements de fábrica - esta query
+# expone latencia/IO real por query (top 20 por tiempo total acumulado), que es la
+# métrica de rendimiento de DB que pidió el usuario más allá de tamaño/conexiones.
+# Requiere `CREATE EXTENSION pg_stat_statements` (ver "Fase 13" en CLAUDE.md).
+pg_stat_statements_top:
+  query: |
+    SELECT
+      queryid::text AS queryid,
+      LEFT(query, 100) AS query,
+      calls,
+      total_exec_time,
+      mean_exec_time,
+      rows,
+      shared_blks_hit,
+      shared_blks_read
+    FROM pg_stat_statements
+    ORDER BY total_exec_time DESC
+    LIMIT 20
+  metrics:
+    - queryid:
+        usage: "LABEL"
+        description: "Identificador estable de la query normalizada"
+    - query:
+        usage: "LABEL"
+        description: "Texto de la query (truncado a 100 caracteres)"
+    - calls:
+        usage: "COUNTER"
+        description: "Cantidad de ejecuciones"
+    - total_exec_time:
+        usage: "COUNTER"
+        description: "Tiempo total de ejecución acumulado (ms)"
+    - mean_exec_time:
+        usage: "GAUGE"
+        description: "Tiempo promedio de ejecución (ms)"
+    - rows:
+        usage: "COUNTER"
+        description: "Filas totales devueltas/afectadas"
+    - shared_blks_hit:
+        usage: "COUNTER"
+        description: "Bloques leídos desde cache (shared buffers)"
+    - shared_blks_read:
+        usage: "COUNTER"
+        description: "Bloques leídos desde disco (señal de presión de IO real)"

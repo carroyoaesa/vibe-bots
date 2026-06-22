@@ -59,6 +59,7 @@
         <div class="tab" data-tab="backtest">Backtest</div>
         <div class="tab" data-tab="operaciones">Operaciones</div>
         <div class="tab" data-tab="sistema">Sistema</div>
+        <div class="tab" data-tab="sistema-hwm">Sistema-HWM</div>
       </div>
 
       <!-- RESUMEN -->
@@ -377,6 +378,22 @@
               </thead>
               <tbody></tbody>
             </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- SISTEMA-HWM -->
+      <div class="tab-panel" id="tab-sistema-hwm">
+        <section class="card">
+          <div class="section-header">
+            <h2>Infraestructura (HWM)</h2>
+          </div>
+          <p class="muted">
+            Hardware de la VM (CPU/RAM/disco/red), espacio usado por vibe-bots (DB/MinIO/logs) y
+            rendimiento de PostgreSQL/Redis. Dashboard "Vibe Bots - Infra" de Grafana (Fase 13).
+          </p>
+          <div id="grafana-container">
+            <p class="muted">Cargando dashboard de Grafana...</p>
           </div>
         </section>
       </div>

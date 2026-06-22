@@ -39,7 +39,17 @@ export function findStaleOrders(
     }
 
     const freshPrice = freshEntryPriceBySymbol.get(order.symbol);
-    if (freshPrice !== undefined && order.limitPrice !== null && freshPrice < order.limitPrice) {
+    // Redondeo a centavos antes de comparar: `order.limitPrice` viene de Alpaca ya redondeado
+    // a 2 decimales (`placeBuyOrder` manda `limitPrice.toFixed(2)`), pero `freshPrice` es un
+    // float crudo de la estrategia (p.ej. 289.52969999999993 para un precio "real" de 289.53) -
+    // sin este redondeo, ese ruido de representación se leía como "el precio bajó" en CADA
+    // ciclo (nunca es 100% igual en punto flotante), cancelando y reemplazando la misma orden
+    // sin que el precio se haya movido un centavo - confirmado en producción 2026-06-22 (AAPL
+    // generaba una orden nueva y un email de alerta cada 5 min). Sigue sin tolerancia de
+    // PORCENTAJE (decisión explícita del usuario, 2026-06-21) - esto solo iguala la precisión
+    // de la comparación a la que ya tienen los precios reales de las órdenes (centavos).
+    const freshPriceCents = freshPrice !== undefined ? Math.round(freshPrice * 100) / 100 : undefined;
+    if (freshPriceCents !== undefined && order.limitPrice !== null && freshPriceCents < order.limitPrice) {
       result.push({ order, reason: 'price_above_market' });
     }
   }
