@@ -92,8 +92,11 @@ function computeSignalWith(
   const action: SignalAction = buyFires ? 'BUY' : sellFires ? 'SELL' : 'HOLD';
 
   const sameExpr = buyConditionId === sellConditionId;
-  const buyDetails = describeConditionExpr(buyExpr, ctx, i);
-  const sellDetails = sameExpr ? buyDetails : describeConditionExpr(sellExpr, ctx, i);
+  // Se pide describeConditionExpr() una vez por acción (BUY/SELL) aunque sameExpr, para que la
+  // marca "→ " resalte la hoja correcta en cada lado (la misma expresión puede tener una hoja
+  // que dispara BUY y otra distinta que dispara SELL, ver conditionExpr.ts).
+  const buyDetails = describeConditionExpr(buyExpr, ctx, i, 'BUY');
+  const sellDetails = describeConditionExpr(sellExpr, ctx, i, 'SELL');
 
   let reason: string;
   if (action === 'BUY') {

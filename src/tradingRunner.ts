@@ -63,6 +63,7 @@ export type TradingAction =
   | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number | null; stopLossPrice: number | null; alpacaOrderId: string }
   | { type: 'CLOSE_POSITION'; symbol: string; qty: number; alpacaOrderId?: string }
   | { type: 'AI_BLOCKED'; symbol: string; reason: string }
+  | { type: 'AI_BLOCKED_SELL'; symbol: string; reason: string }
   | { type: 'TRADING_DISABLED'; symbol: string }
   | { type: 'NO_ACTION'; symbol: string; reason: string }
   | { type: 'SKIPPED'; symbol: string; reason: string }
@@ -275,34 +276,68 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     // Tarea de eficiencia (2026-06-21): Claude antes se consultaba para los 27 símbolos en
     // cada ciclo (o, como mínimo, 1 vez por día aunque no hubiera BUYs, vía el viejo gate de
     // Redis `claude:last_run_date`) - eso multiplicaba el costo sin necesidad real: Claude
-    // SOLO puede actuar (vetar) sobre una señal BUY que ya pasó los demás chequeos, así que
-    // HOLD/SELL no aportan nada evaluados. El filtro de candidatos pasa primero por la
+    // SOLO puede actuar (vetar) sobre una señal BUY/SELL que ya pasó los demás chequeos, así
+    // que HOLD no aporta nada evaluado. El filtro de candidatos BUY pasa primero por la
     // clasificación manual (symbol_classifications) - un símbolo bloqueado nunca coloca una
     // orden real aunque su señal técnica sea BUY, así que tampoco tiene sentido gastar
     // tokens evaluándolo.
+    //
+    // 2026-06-23: dos exclusiones más para BUY, mismo motivo (evitar gastar tokens en un
+    // veredicto que el pre-trade check de la Pasada 2 va a ignorar de todas formas, ver
+    // preTradeCheck.ts#computeCanPlaceBuyOrder checks 2/3): posición ya abierta para el símbolo
+    // (`POSITION_ALREADY_OPEN`, bloqueo incondicional - Claude solo puede VETAR un BUY, nunca
+    // habilita comprar más de una posición) y orden BUY ya pendiente (`PENDING_BUY_ORDER`).
+    // Confirmado en producción 2026-06-22/23: SCHD acumuló evaluaciones de Claude cada 5 min
+    // durante horas con una posición ya abierta de 31 acciones, y AAPL hizo lo mismo mientras
+    // tenía una orden BUY pendiente sin llenar (48 llamadas en un solo día solo de AAPL,
+    // ver claude_usage_log) - en ningún caso Claude podía cambiar el resultado.
+    //
+    // 2026-06-23: se agrega también un filtro de candidatos SELL (antes Claude NUNCA evaluaba
+    // señales SELL - decisión explícita del usuario de hoy, ver claude.ts#buildPrompt para el
+    // cambio de prompt correspondiente: ahora "avoid" sobre un candidato SELL VETA el cierre
+    // -`AI_BLOCKED_SELL`, la posición queda abierta ese ciclo en vez de cerrarse). Solo es
+    // candidato un símbolo con señal SELL que además tiene posición abierta - si no hay
+    // posición, `closePosition` sería un no-op (`NO_ACTION: Sin posición abierta para cerrar`)
+    // y evaluarlo con Claude sería gastar tokens en un veredicto irrelevante, mismo principio
+    // que las exclusiones de BUY de arriba. A diferencia de BUY, no se filtra por clasificación
+    // bloqueada - el hard-block de Fase 9 es solo sobre compras, una posición existente se
+    // puede vender igual esté o no bloqueado el símbolo para comprar.
     const classifications = await getAllSymbolClassifications(pool);
     const buyCandidateIndexes: number[] = [];
+    const sellCandidateIndexes: number[] = [];
     for (let i = 0; i < WATCHLIST.length; i++) {
-      if (signals[i].signal !== 'BUY') continue;
-      if ((classifications[WATCHLIST[i]] ?? 'apto') === 'bloqueado') continue;
-      buyCandidateIndexes.push(i);
+      const symbol = WATCHLIST[i];
+      const technicalSignal = signals[i].signal;
+      if (technicalSignal === 'BUY') {
+        if ((classifications[symbol] ?? 'apto') === 'bloqueado') continue;
+        if (positionsBySymbol.has(symbol)) continue;
+        if ((openOrdersBySymbol.get(symbol) ?? []).some((o) => o.side === 'buy')) continue;
+        buyCandidateIndexes.push(i);
+      } else if (technicalSignal === 'SELL') {
+        if (!positionsBySymbol.has(symbol)) continue;
+        sellCandidateIndexes.push(i);
+      }
     }
+    const candidateIndexes = [...buyCandidateIndexes, ...sellCandidateIndexes];
     const buyCandidateSymbols = buyCandidateIndexes.map((i) => WATCHLIST[i]);
-    const nonCandidateSymbols = WATCHLIST.filter((symbol) => !buyCandidateSymbols.includes(symbol));
+    const sellCandidateSymbols = sellCandidateIndexes.map((i) => WATCHLIST[i]);
+    const candidateSymbols = [...buyCandidateSymbols, ...sellCandidateSymbols];
+    const nonCandidateSymbols = WATCHLIST.filter((symbol) => !candidateSymbols.includes(symbol));
 
     // Invalidación de evaluaciones de IA (Tarea 2, mismo formato '<recomendacion>-<estado>' en
     // la columna existente ai_assessments.recommendation, sin columnas nuevas): toda evaluación
     // 'fresh' pasa a 'stale' antes de evaluar de nuevo; los símbolos que ni siquiera son
-    // candidatos este ciclo (HOLD/SELL técnico o bloqueados) bajan directo a 'not-evaluated'.
-    // Si un candidato se reevalúa más abajo, su 'stale' recién puesto queda pisado por la fila
-    // 'fresh' nueva que inserta saveAssessment(); si Claude falla para un candidato, su 'stale'
-    // queda como está (correcto: hay opinión vieja, pero no se reevaluó este ciclo).
+    // candidatos este ciclo (HOLD técnico, BUY bloqueado/con posición/orden pendiente, o SELL
+    // sin posición) bajan directo a 'not-evaluated'. Si un candidato se reevalúa más abajo, su
+    // 'stale' recién puesto queda pisado por la fila 'fresh' nueva que inserta saveAssessment();
+    // si Claude falla para un candidato, su 'stale' queda como está (correcto: hay opinión
+    // vieja, pero no se reevaluó este ciclo).
     await markAssessmentsStale(pool);
     await markAssessmentsNotEvaluated(pool, nonCandidateSymbols);
 
     console.log(
-      `[runTradingCycle] Fase de IA (Claude): ${buyCandidateSymbols.length} símbolo(s) candidato(s) BUY este ciclo` +
-        (buyCandidateSymbols.length > 0 ? ` -> ${buyCandidateSymbols.join(', ')}` : ' (costo $0 este ciclo)')
+      `[runTradingCycle] Fase de IA (Claude): ${buyCandidateSymbols.length} BUY + ${sellCandidateSymbols.length} SELL candidato(s) este ciclo` +
+        (candidateSymbols.length > 0 ? ` -> ${candidateSymbols.join(', ')}` : ' (costo $0 este ciclo)')
     );
 
     let assessments = new Map<string, SymbolAssessment>();
@@ -310,14 +345,14 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     let claudeExperimentPromise: Promise<void> = Promise.resolve();
     const todayStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD' UTC
 
-    if (buyCandidateSymbols.length > 0) {
+    if (candidateSymbols.length > 0) {
       try {
         const anthropicConfig = loadAnthropicConfig();
         const anthropicClient = createAnthropicClient(anthropicConfig);
 
         const [contexts, macro] = await Promise.all([
           Promise.all(
-            buyCandidateIndexes.map(async (index): Promise<SymbolAssessmentContext> => {
+            candidateIndexes.map(async (index): Promise<SymbolAssessmentContext> => {
               const symbol = WATCHLIST[index];
               const signal = signals[index];
               const [fundamentals, news] = await Promise.all([
@@ -368,12 +403,15 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         // latencia a la Pasada 2), pero se guarda la promesa (ya con .catch propio, nunca
         // rechaza) para esperarla recién al final del ciclo, ANTES de cerrar el pool en el
         // `finally` - si no, una query tardía del experimento podría correr contra un pool
-        // ya cerrado.
+        // ya cerrado. Sigue limitado a candidatos BUY (sin cambios de alcance al agregar el
+        // gate de SELL 2026-06-23) - extenderlo a SELL multiplicaría el costo (3 llamadas extra
+        // por candidato) sin que se haya pedido; `contexts` acá puede incluir candidatos SELL
+        // (ver `candidateIndexes` arriba), así que se filtra explícitamente por `signal==='BUY'`.
         claudeExperimentPromise = runClaudeExperiment(
           pool,
           anthropicClient,
           model,
-          contexts,
+          contexts.filter((c) => c.signal === 'BUY'),
           macro,
           results,
           settings.claudeExperimentEnabled,
@@ -541,6 +579,13 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
         } else if (signal.signal === 'SELL') {
           if (!position) {
             actions.push({ type: 'NO_ACTION', symbol, reason: 'Sin posición abierta para cerrar' });
+          } else if (assessment?.recommendation === 'avoid') {
+            // Veto real sobre SELL (decisión explícita del usuario, 2026-06-23 - antes Claude
+            // nunca evaluaba candidatos SELL, ver el filtro de `sellCandidateIndexes` arriba y
+            // claude.ts#buildPrompt para cómo se le explica a Claude qué significa "avoid" en
+            // contexto de venta). La posición queda abierta este ciclo - si la señal técnica
+            // sigue SELL en el próximo ciclo, vuelve a evaluarse (sin caché de "ya vetado").
+            actions.push({ type: 'AI_BLOCKED_SELL', symbol, reason: assessment.rationale });
           } else {
             for (const openOrder of symbolOpenOrders) {
               await cancelOrder(alpacaClient, openOrder.id);
@@ -570,7 +615,12 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
               orderId: closeOrder.id,
               signal,
               bars: barsBySymbol.get(symbol) ?? [],
-              ai: null, // la fase de IA (Fase 11) solo evalúa candidatos BUY, nunca SELL
+              // Desde 2026-06-23 Claude SÍ puede evaluar candidatos SELL (ver arriba) - si hubo
+              // evaluación y no vetó (sino no se llegaría a este branch), se muestra en el email
+              // igual que ya se hace para BUY.
+              ai: assessment
+                ? { recommendation: assessment.recommendation, score: assessment.score, confidence: assessment.confidence, rationale: assessment.rationale }
+                : null,
             });
             openPositionsCount -= 1;
           }

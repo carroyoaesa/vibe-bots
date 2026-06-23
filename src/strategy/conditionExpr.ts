@@ -138,10 +138,25 @@ export function leafIds(node: ConditionExprNode): string[] {
   return ids;
 }
 
-/** Compone los `describe()` de cada hoja (preserva el detalle de indicadores de Fase 6.1 en `reason`). */
-export function describeConditionExpr(node: ConditionExprNode, ctx: IndicatorContext, i: number): string {
-  return leafIds(node)
-    .map((id) => CONDITIONS.find((c) => c.id === id)!.describe(ctx, i))
+/**
+ * Compone los `describe()` de cada hoja (preserva el detalle de indicadores de Fase 6.1 en
+ * `reason`). Para expresiones de 2-3 condiciones, antepone "→ " a la descripción de cada hoja
+ * cuyo `evaluate(ctx, i)` matchea `action` (BUY para `buyExpr`, SELL para `sellExpr`) - sin esa
+ * marca, un email/fila de dashboard con 3 sub-condiciones no decía cuál de las 3 fue la que
+ * realmente generó la orden, lo que hacía parecer "misterioso" un precio estimado de entrada
+ * que en realidad viene de UNA sola hoja (ver nota 2026-06-23 en conditions.ts sobre el sesgo
+ * de `trend_pullback_sma50`/`bollinger_reversion`/etc.). Para una expresión trivial (1 sola
+ * hoja) no se marca nada - sería ruido redundante, ya lo dice el propio "BUY por...".
+ */
+export function describeConditionExpr(node: ConditionExprNode, ctx: IndicatorContext, i: number, action?: ConditionAction): string {
+  const ids = leafIds(node);
+  return ids
+    .map((id) => {
+      const condition = CONDITIONS.find((c) => c.id === id)!;
+      const desc = condition.describe(ctx, i);
+      const fired = ids.length > 1 && action !== undefined && condition.evaluate(ctx, i) === action;
+      return fired ? `→ ${desc}` : desc;
+    })
     .join('; ');
 }
 

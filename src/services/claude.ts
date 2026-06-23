@@ -162,12 +162,22 @@ function buildPrompt(symbols: SymbolAssessmentContext[], macro: MacroObservation
       'backtests propios (ver "Condición activa" en cada símbolo). SMA10/SMA30/RSI14/Momentum10 se ' +
       'muestran siempre como contexto general, independientemente de la condición activa.',
     '',
-    'Tu evaluación SOLO se usa como FILTRO de veto sobre señales BUY ya generadas por la estrategia: ' +
-      'una recomendación "avoid" bloquea esa compra (acción AI_BLOCKED). No genera compras nuevas, ' +
-      'no afecta señales SELL ni HOLD. Regla estricta de recomendaciones: ' +
-      'usa "buy" ÚNICAMENTE cuando la "Señal técnica" del símbolo ya es BUY y no hay motivos para vetarla. ' +
-      'Para señales HOLD o SELL usa SIEMPRE "hold" (o "avoid" si hay razón clara de alerta). ' +
-      'Nunca uses "buy" cuando la señal técnica es HOLD o SELL — hacerlo no genera ninguna orden pero confunde el dashboard.',
+    'Tu evaluación SOLO se usa como FILTRO DE VETO sobre señales BUY y SELL ya generadas por la ' +
+      'estrategia (nunca genera una operación nueva, nunca afecta señales HOLD). Cada símbolo de ' +
+      'abajo ya tiene una "Señal técnica" decidida (BUY, SELL o HOLD) - tu trabajo es decir si el ' +
+      'bot debería seguir adelante con ESA señal o vetarla, no proponer una señal distinta.',
+    '',
+    'Regla estricta de recomendaciones, IMPORTANTE - la palabra "hold" en tu respuesta NO significa ' +
+      '"mantener la posición": significa "no objeto, que el bot ejecute la señal técnica tal cual ' +
+      'está". El significado de cada valor depende de la "Señal técnica" de ESE símbolo:',
+    '  - Señal técnica BUY: usa "buy" si estás de acuerdo con comprar ahora; usa "avoid" si creés ' +
+      'que NO debería comprarse (esto bloquea la compra, acción AI_BLOCKED).',
+    '  - Señal técnica SELL: usa "hold" si estás de acuerdo con cerrar la posición ahora (sí, "hold" ' +
+      '- el nombre es por consistencia del campo, pero el efecto es que la venta SÍ procede); usa ' +
+      '"avoid" si creés que la posición debería seguir abierta este ciclo (esto bloquea el cierre, ' +
+      'acción AI_BLOCKED_SELL, y la posición sigue abierta).',
+    '  - Señal técnica HOLD: usa siempre "hold" (no hay ninguna acción que vetar).',
+    '  - Nunca uses "buy" para un símbolo cuya "Señal técnica" no sea BUY - no genera ninguna orden pero confunde el dashboard.',
     '',
     'Contexto macroeconómico (FRED, EE.UU.):',
     macroLines,

@@ -10,7 +10,8 @@ export interface StaleOrderInfo {
 
 /**
  * Órdenes BUY abiertas candidatas a huérfanas/desalineadas:
- * - 'timeout': pendientes hace más de `timeoutMin` minutos.
+ * - 'timeout': pendientes hace más de `timeoutMin` minutos, Y el precio fresco de hoy para ese
+ *   símbolo (si lo hay) es DISTINTO del límite de la orden - ver nota 2026-06-23 más abajo.
  * - 'price_above_market': el símbolo tiene señal BUY vigente este ciclo
  *   (`freshEntryPriceBySymbol`) y el precio que se colocaría HOY es MENOR que el límite de la
  *   orden pendiente (la orden vieja está pagando de más respecto de la estimación actual) -
@@ -19,6 +20,23 @@ export interface StaleOrderInfo {
  *   propósito: si el precio de hoy es MAYOR que el límite viejo, no se toca - una orden de
  *   compra con límite más bajo no es "peor", solo menos probable de fillear, y reemplazarla no
  *   aporta nada.
+ *
+ * Nota 2026-06-23: 'timeout' ya NO dispara si el precio fresco de hoy redondea exactamente al
+ * mismo valor que el límite de la orden. Antes de este cambio, cancelar por timeout no miraba el
+ * precio en absoluto - con una señal BUY "pegajosa" (condición técnica que se mantiene varias
+ * horas porque viene de la vela diaria, que solo se actualiza con la ingesta 3x/día) y un precio
+ * estimado que tampoco cambia, cada ~`timeoutMin` minutos se cancelaba la orden y la Pasada 2 del
+ * mismo ciclo colocaba una IDÉNTICA (mismo símbolo/precio/cantidad) - sin ningún cambio real,
+ * solo un ID de orden nuevo y, por la Fase 12, un email de alerta nuevo. Confirmado en producción
+ * 2026-06-22: AAPL generó 10 órdenes BUY a $289.53 entre 16:05 y 19:50 UTC mientras su vela diaria
+ * (y por lo tanto su señal/precio estimado) quedó congelada en $300.89 toda la tarde - cada
+ * reemplazo sin cambio de precio disparó su propio email y su propia evaluación de Claude (48
+ * llamadas solo de AAPL ese día). Si el símbolo ya no es candidato BUY este ciclo
+ * (`freshPrice === undefined`, p.ej. la condición cambió a HOLD/SELL), 'timeout' sigue
+ * disparando igual que antes - ese caso es una orden genuinamente huérfana (no hay reemplazo en
+ * la Pasada 2), no el bucle de clones. Sin tolerancia de PORCENTAJE en ningún lado de esta
+ * función (decisión explícita del usuario, 2026-06-21) - esto solo evita reemplazar una orden por
+ * una copia exacta de sí misma.
  */
 export function findStaleOrders(
   openOrders: AlpacaOrder[],
@@ -32,12 +50,6 @@ export function findStaleOrders(
   for (const order of openOrders) {
     if (order.side !== 'buy' || !order.submittedAt) continue;
 
-    const ageMs = now.getTime() - new Date(order.submittedAt).getTime();
-    if (ageMs > timeoutMs) {
-      result.push({ order, reason: 'timeout' });
-      continue;
-    }
-
     const freshPrice = freshEntryPriceBySymbol.get(order.symbol);
     // Redondeo a centavos antes de comparar: `order.limitPrice` viene de Alpaca ya redondeado
     // a 2 decimales (`placeBuyOrder` manda `limitPrice.toFixed(2)`), pero `freshPrice` es un
@@ -49,6 +61,14 @@ export function findStaleOrders(
     // PORCENTAJE (decisión explícita del usuario, 2026-06-21) - esto solo iguala la precisión
     // de la comparación a la que ya tienen los precios reales de las órdenes (centavos).
     const freshPriceCents = freshPrice !== undefined ? Math.round(freshPrice * 100) / 100 : undefined;
+    const priceUnchanged = freshPriceCents !== undefined && order.limitPrice !== null && freshPriceCents === order.limitPrice;
+
+    const ageMs = now.getTime() - new Date(order.submittedAt).getTime();
+    if (ageMs > timeoutMs && !priceUnchanged) {
+      result.push({ order, reason: 'timeout' });
+      continue;
+    }
+
     if (freshPriceCents !== undefined && order.limitPrice !== null && freshPriceCents < order.limitPrice) {
       result.push({ order, reason: 'price_above_market' });
     }

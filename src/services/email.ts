@@ -21,7 +21,7 @@ export interface TradeAlertEntry {
   signal: SignalResult;
   /** Velas usadas para recalcular la señal este ciclo - insumo del gráfico adjunto. */
   bars: OhlcBar[];
-  /** Evaluación de Claude de este mismo ciclo - solo aplica a BUY (Fase 11, gate BUY-only). */
+  /** Evaluación de Claude de este mismo ciclo, si la hubo (Fase 11/BUY desde 2026-06-21, SELL desde 2026-06-23 - `null` si Claude no estaba configurado o el símbolo no era candidato). */
   ai: TradeAlertAiInfo | null;
 }
 
