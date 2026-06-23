@@ -21,6 +21,7 @@ import {
   getRecentNewsForSymbol,
   getLatestMacroObservations,
 } from './services/marketStore';
+import { createMarketDataClient, getLatestQuotes } from './services/marketData';
 import {
   createAlpacaClient,
   getAccount,
@@ -181,6 +182,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
 
   const pool = createPostgresPool(postgresConfig);
   const alpacaClient = createAlpacaClient(alpacaConfig);
+  const marketDataClient = createMarketDataClient(alpacaConfig);
   const redis = createRedisClient(loadRedisConfig());
 
   try {
@@ -217,17 +219,39 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       signals.push(computeSignal(symbol, bars, settings.riskProfile, buyConditionId, sellConditionId, settings.exitMode));
     }
 
+    // Cotización en vivo (snapshot de Alpaca, 1 sola llamada para todo el watchlist vía
+    // getLatestQuotes - feed=iex) - 2026-06-23: signal.price viene de la vela diaria, que solo
+    // se refresca 3x/día vía `npm run ingest` - puede quedar significativamente desalineada del
+    // mercado real durante la sesión. Confirmado en producción: GOOGL cayó hasta 6% intradía el
+    // 2026-06-22 (sell-off de "hiperescaladores de IA") sin que el bot lo viera - la orden BUY,
+    // con límite calculado sobre el precio desactualizado, terminó llenándose en medio de la
+    // caída en vez de evitarla. Esto se usa SOLO en decisiones de precio/tamaño al colocar la
+    // orden (`entryPrice`/`qty` más abajo y `freshEntryPriceBySymbol`) - nunca para recalcular
+    // indicadores técnicos (SMA/RSI/MACD/Bollinger/etc., que siguen viniendo 100% de
+    // `market_bars`) ni para lo persistido en `trading_signals.price`. Fail-open: si la llamada
+    // falla, el Map queda vacío y cada símbolo cae de nuevo a `signal.price` (comportamiento
+    // anterior, sin cambios).
+    let livePrices = new Map<string, number>();
+    try {
+      livePrices = await getLatestQuotes(marketDataClient, WATCHLIST);
+    } catch (error) {
+      console.warn('[runTradingCycle] No se pudieron obtener cotizaciones en vivo de Alpaca (se usa el precio de la vela diaria como fallback):', error instanceof Error ? error.message : error);
+    }
+
     // Precio de entrada que se colocaría HOY para cada símbolo con señal BUY vigente - mismo
-    // cálculo que la Pasada 2 (min(estimatedEntryPrice, price)) - usado por cancelStaleOrders
-    // para detectar órdenes BUY pendientes cuyo precio ya no se parece al de hoy (p.ej. una
-    // orden encolada fuera de horario de mercado cuya señal cambió antes de la sesión siguiente).
+    // cálculo que la Pasada 2 (min(estimatedEntryPrice, precio en vivo)) - usado por
+    // cancelStaleOrders para detectar órdenes BUY pendientes cuyo precio ya no se parece al de
+    // hoy (p.ej. una orden encolada fuera de horario de mercado cuya señal cambió antes de la
+    // sesión siguiente, o cuyo precio de mercado se movió fuerte intradía).
     const freshEntryPriceBySymbol = new Map<string, number>();
     for (let i = 0; i < WATCHLIST.length; i++) {
       if (signals[i].signal !== 'BUY') continue;
+      const symbol = WATCHLIST[i];
+      const livePrice = livePrices.get(symbol) ?? signals[i].price;
       const entryPrice = signals[i].estimatedEntryPrice !== null
-        ? Math.min(signals[i].estimatedEntryPrice!, signals[i].price)
-        : signals[i].price;
-      freshEntryPriceBySymbol.set(WATCHLIST[i], entryPrice);
+        ? Math.min(signals[i].estimatedEntryPrice!, livePrice)
+        : livePrice;
+      freshEntryPriceBySymbol.set(symbol, entryPrice);
     }
 
     // Detección de órdenes BUY huérfanas (>pending_order_timeout_min pendientes) o cuyo precio
@@ -433,6 +457,10 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     for (let index = 0; index < WATCHLIST.length; index++) {
       const symbol = WATCHLIST[index];
       const signal = signals[index];
+      // Precio en vivo (ver arriba) con fallback al precio de la vela diaria si no hubo
+      // cotización para este símbolo este ciclo - única referencia de "precio actual" para
+      // decisiones de orden en este loop; signal.price (e indicadores) no se tocan.
+      const livePrice = livePrices.get(symbol) ?? signal.price;
 
       try {
         const assessment = assessments.get(symbol);
@@ -516,28 +544,34 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           } else {
             const positionValue = estimatedOrderValue;
             // Ajusta qty si excede el buying power disponible (ocurre con flujo_de_caja
-            // cuando hay >13 posiciones abiertas y se empieza a usar margen).
-            let qty = Math.floor(positionValue / signal.price);
-            if (qty > 0 && qty * signal.price > account.buyingPower) {
-              qty = Math.floor(account.buyingPower / signal.price);
+            // cuando hay >13 posiciones abiertas y se empieza a usar margen). Usa livePrice
+            // (no signal.price) para que el tamaño en dólares refleje el precio real de hoy,
+            // no el cierre de la vela diaria.
+            let qty = Math.floor(positionValue / livePrice);
+            if (qty > 0 && qty * livePrice > account.buyingPower) {
+              qty = Math.floor(account.buyingPower / livePrice);
             }
 
             if (qty < 1) {
               actions.push({
                 type: 'SKIPPED',
                 symbol,
-                reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${signal.price.toFixed(2)}, buyingPower=$${account.buyingPower.toFixed(0)})`,
+                reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${livePrice.toFixed(2)}, buyingPower=$${account.buyingPower.toFixed(0)})`,
               });
             } else {
-              if (account.cash < qty * signal.price) {
-                console.log(`[${symbol}] Usando margen: cash=$${account.cash.toFixed(0)}, orden=$${(qty * signal.price).toFixed(0)}, buyingPower=$${account.buyingPower.toFixed(0)}`);
+              if (account.cash < qty * livePrice) {
+                console.log(`[${symbol}] Usando margen: cash=$${account.cash.toFixed(0)}, orden=$${(qty * livePrice).toFixed(0)}, buyingPower=$${account.buyingPower.toFixed(0)}`);
               }
               // Orden límite al precio estimado de entrada (no a mercado), con TP/SL relativos a ese precio.
-              // Si el precio actual ya está por debajo del estimado, conviene tomar el menor de los dos
-              // (mejor precio de entrada para el comprador) en lugar de esperar a que suba al estimado.
+              // Si el precio real de hoy (livePrice) ya está por debajo del estimado, conviene tomar el
+              // menor de los dos (mejor precio de entrada para el comprador) en lugar de esperar a que
+              // suba al estimado - 2026-06-23: antes comparaba contra signal.price (cierre de la vela
+              // diaria, desactualizado durante la sesión), lo que dejó pasar una compra de GOOGL en medio
+              // de una caída intradía del 6% que el precio "congelado" no reflejaba (ver nota de
+              // getLatestQuotes más arriba).
               const entryPrice = signal.estimatedEntryPrice !== null
-                ? Math.min(signal.estimatedEntryPrice, signal.price)
-                : signal.price;
+                ? Math.min(signal.estimatedEntryPrice, livePrice)
+                : livePrice;
 
               // Orden límite simple, sin TP/SL. La posición se cierra únicamente cuando
               // la condición activa emite señal SELL (closePosition más abajo).

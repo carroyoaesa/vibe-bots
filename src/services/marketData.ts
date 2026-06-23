@@ -125,6 +125,31 @@ export async function getAdjustedCloses(client: AxiosInstance, symbols: string[]
   return closes;
 }
 
+/**
+ * Último precio operado (snapshot de Alpaca, 1 sola llamada para todo el watchlist vía
+ * `/v2/stocks/snapshots?symbols=...`, no 1 por símbolo) - feed=iex, igual que `getDailyBars`.
+ * Pensado para refrescar el precio "actual" usado en decisiones de ORDEN (precio límite, tamaño
+ * de posición) sin esperar al próximo `npm run ingest` (solo 3x/día) - nunca para recalcular
+ * indicadores técnicos, que siguen viniendo 100% de `market_bars`/velas diarias (ver
+ * `tradingRunner.ts`). Símbolos sin `latestTrade` en la respuesta (mercado recién abierto,
+ * sin trades todavía, etc.) simplemente no aparecen en el Map - el caller debe degradar al
+ * precio de la vela diaria (fail-open, mismo patrón que el resto de este archivo).
+ */
+export async function getLatestQuotes(client: AxiosInstance, symbols: string[]): Promise<Map<string, number>> {
+  const { data } = await client.get('/v2/stocks/snapshots', {
+    params: { symbols: symbols.join(','), feed: 'iex' },
+  });
+
+  const prices = new Map<string, number>();
+  for (const symbol of symbols) {
+    const price = data[symbol]?.latestTrade?.p;
+    if (typeof price === 'number' && price > 0) {
+      prices.set(symbol, price);
+    }
+  }
+  return prices;
+}
+
 export interface NewsItem {
   id: number;
   headline: string;
