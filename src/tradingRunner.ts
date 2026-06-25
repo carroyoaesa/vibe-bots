@@ -23,14 +23,17 @@ import {
 } from './services/marketStore';
 import { createMarketDataClient, getLatestQuotes } from './services/marketData';
 import {
-  createAlpacaClient,
   getAccount,
   getPositions,
   getOpenOrders,
   placeBuyOrder,
   cancelOrder,
   closePosition,
+  getAlpacaClient,
+  ACCOUNT_GROUPS,
+  AccountGroup,
   AlpacaAccountSummary,
+  AlpacaPosition,
   AlpacaOrder,
 } from './services/alpaca';
 import { setupTradingSchema, saveSignal, saveOrder, saveAssessment, markAssessmentsStale, markAssessmentsNotEvaluated } from './services/tradingStore';
@@ -61,8 +64,8 @@ const NEWS_LOOKBACK = 5;
 
 
 export type TradingAction =
-  | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number | null; stopLossPrice: number | null; alpacaOrderId: string }
-  | { type: 'CLOSE_POSITION'; symbol: string; qty: number; alpacaOrderId?: string }
+  | { type: 'OPEN_POSITION'; symbol: string; qty: number; takeProfitPrice: number | null; stopLossPrice: number | null; alpacaOrderId: string; accountGroup: AccountGroup }
+  | { type: 'CLOSE_POSITION'; symbol: string; qty: number; alpacaOrderId?: string; accountGroup: AccountGroup }
   | { type: 'AI_BLOCKED'; symbol: string; reason: string }
   | { type: 'AI_BLOCKED_SELL'; symbol: string; reason: string }
   | { type: 'TRADING_DISABLED'; symbol: string }
@@ -70,8 +73,82 @@ export type TradingAction =
   | { type: 'SKIPPED'; symbol: string; reason: string }
   | { type: 'ERROR'; symbol: string; error: string };
 
+/**
+ * Estado de trading de una cuenta Alpaca real (Fase Operaciones multi-cuenta, ruteo real
+ * 2026-06-25): reemplaza el `alpacaClient`/`account`/`positions`/`openOrders` único de
+ * antes - cada grupo con credenciales (`getAlpacaClient`, `services/alpaca.ts`) tiene su
+ * propio cliente, cuenta y posiciones/órdenes, así una orden BUY/SELL se ejecuta de
+ * verdad contra la cuenta que corresponde a la clasificación ACTUAL del símbolo
+ * (`classificationToAccountGroup`), no siempre contra la misma cuenta única.
+ */
+interface GroupTradingState {
+  client: AxiosInstance;
+  account: AlpacaAccountSummary;
+  positionsBySymbol: Map<string, AlpacaPosition>;
+  openOrders: AlpacaOrder[];
+  openOrdersBySymbol: Map<string, AlpacaOrder[]>;
+  openPositionsCount: number;
+}
+
+function buildOpenOrdersBySymbol(openOrders: AlpacaOrder[]): Map<string, AlpacaOrder[]> {
+  const map = new Map<string, AlpacaOrder[]>();
+  for (const order of openOrders) {
+    const list = map.get(order.symbol) ?? [];
+    list.push(order);
+    map.set(order.symbol, list);
+  }
+  return map;
+}
+
+/**
+ * Arma el estado por cuenta para los grupos que tengan credenciales configuradas
+ * (`ALPACA_<GRUPO>_KEY/_SECRET/_ENDPOINT` - hoy, `bloqueados` no las tiene, igual que en
+ * `operationsSync.ts`). `Promise.allSettled` por grupo: si Alpaca falla para uno (p.ej.
+ * `observados`), no debe tirar abajo el ciclo completo - ese grupo simplemente no entra
+ * al mapa devuelto, y los símbolos que le correspondan se resuelven en
+ * `NO_ACTION/SIN_CUENTA_CONFIGURADA` en la Pasada 2 (mismo tratamiento que "sin cliente").
+ */
+async function buildGroupTradingStates(): Promise<Map<AccountGroup, GroupTradingState>> {
+  const groupStates = new Map<AccountGroup, GroupTradingState>();
+
+  const entries = ACCOUNT_GROUPS
+    .map((group) => ({ group, client: getAlpacaClient(group) }))
+    .filter((entry): entry is { group: AccountGroup; client: AxiosInstance } => entry.client !== null);
+
+  const settled = await Promise.allSettled(
+    entries.map(async ({ group, client }) => {
+      const [account, positions, openOrders] = await Promise.all([
+        getAccount(client),
+        getPositions(client),
+        getOpenOrders(client),
+      ]);
+      return { group, client, account, positions, openOrders };
+    })
+  );
+
+  settled.forEach((outcome, index) => {
+    const { group } = entries[index];
+    if (outcome.status === 'rejected') {
+      console.warn(`[buildGroupTradingStates] No se pudo obtener el estado de la cuenta '${group}' - se omite este ciclo:`, outcome.reason instanceof Error ? outcome.reason.message : outcome.reason);
+      return;
+    }
+    const { client, account, positions, openOrders } = outcome.value;
+    groupStates.set(group, {
+      client,
+      account,
+      positionsBySymbol: new Map(positions.map((p) => [p.symbol, p])),
+      openOrders,
+      openOrdersBySymbol: buildOpenOrdersBySymbol(openOrders),
+      openPositionsCount: positions.length,
+    });
+  });
+
+  return groupStates;
+}
+
 export interface TradingCycleResult {
   account: AlpacaAccountSummary;
+  accountsByGroup: Record<AccountGroup, AlpacaAccountSummary | null>;
   signals: SignalResult[];
   actions: TradingAction[];
   snapshotKey: string | null;
@@ -181,7 +258,6 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
   const postgresConfig = loadPostgresConfig();
 
   const pool = createPostgresPool(postgresConfig);
-  const alpacaClient = createAlpacaClient(alpacaConfig);
   const marketDataClient = createMarketDataClient(alpacaConfig);
   const redis = createRedisClient(loadRedisConfig());
 
@@ -195,11 +271,22 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     const settings = await getSettings(pool);
     const symbolConditions = await getMainSymbolConditions(pool);
 
-    const account = await getAccount(alpacaClient);
-    const positions = await getPositions(alpacaClient);
-    let openOrders = await getOpenOrders(alpacaClient);
-    const positionsBySymbol = new Map(positions.map((p) => [p.symbol, p]));
-    let openPositionsCount = positions.length;
+    // Estado por cuenta real (Fase Operaciones multi-cuenta, ruteo real 2026-06-25) - antes
+    // un único `alpacaClient`/`account`/`positions`/`openOrders` para TODO el watchlist
+    // (siempre la cuenta de `ALPACA_API_KEY`, que resulta ser idéntica a `ALPACA_APTOS_*`).
+    // Cada símbolo se resuelve más abajo a la cuenta de SU clasificación actual
+    // (`classificationToAccountGroup`) - ver `buildGroupTradingStates`.
+    const groupStates = await buildGroupTradingStates();
+    const aptosState = groupStates.get('aptos') ?? null;
+    if (!aptosState) {
+      throw new Error("No se pudo obtener el estado de la cuenta 'aptos' (ALPACA_API_KEY/ALPACA_APTOS_*) - sin esto no puede correr el ciclo de trading.");
+    }
+    // Resumen único para compatibilidad (trade.ts/CLI, `/api/trading/run`) - sigue siendo el
+    // de 'aptos', la cuenta "principal" que ya mostraba el dashboard antes de esta fase.
+    const account = aptosState.account;
+    const accountsByGroup = Object.fromEntries(
+      ACCOUNT_GROUPS.map((group) => [group, groupStates.get(group)?.account ?? null])
+    ) as Record<AccountGroup, AlpacaAccountSummary | null>;
 
     // Pasada 1: señales técnicas frescas para todo el watchlist (sin tocar la DB todavía),
     // así quedan disponibles para la fase de IA antes de guardar/ejecutar nada.
@@ -257,45 +344,48 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     // Detección de órdenes BUY huérfanas (>pending_order_timeout_min pendientes) o cuyo precio
     // límite quedó por encima del precio que se colocaría hoy para ese símbolo (sin tolerancia
     // mínima - cualquier diferencia cuenta, ver staleOrders.ts) - una vez por ciclo de trading
-    // (no en el poller de 60s). Por defecto solo loguea/devuelve la
-    // lista (bot_settings.auto_cancel_stale_orders=false) - la UI las muestra para que el
-    // usuario decida cancelarlas manualmente. Si está activo, además de cancelarlas en
-    // Alpaca, se sacan de `openOrders` en memoria ANTES de construir `openOrdersBySymbol` -
-    // así, si la señal del símbolo sigue siendo BUY este ciclo, la Pasada 2 las reemplaza con
-    // una orden nueva al precio recalculado en el mismo ciclo (ver cancelStaleOrders).
-    const { stale: staleOrders, cancelled: cancelledStaleOrders } = await cancelStaleOrders(
-      alpacaClient,
-      openOrders,
-      settings.pendingOrderTimeoutMin,
-      settings.autoCancelStaleOrders,
-      freshEntryPriceBySymbol
-    );
+    // (no en el poller de 60s), por cada cuenta real (Fase Operaciones multi-cuenta - antes
+    // una sola pasada sobre la única cuenta de `alpacaClient`). Por defecto solo loguea/
+    // devuelve la lista (bot_settings.auto_cancel_stale_orders=false) - la UI las muestra para
+    // que el usuario decida cancelarlas manualmente. Si está activo, además de cancelarlas en
+    // Alpaca, se sacan de `groupState.openOrders` en memoria ANTES de reconstruir
+    // `openOrdersBySymbol` de ese grupo - así, si la señal del símbolo sigue siendo BUY este
+    // ciclo, la Pasada 2 las reemplaza con una orden nueva al precio recalculado en el mismo
+    // ciclo (ver cancelStaleOrders).
+    const staleOrders: { order: AlpacaOrder; reason: string }[] = [];
+    for (const groupState of groupStates.values()) {
+      const { stale, cancelled } = await cancelStaleOrders(
+        groupState.client,
+        groupState.openOrders,
+        settings.pendingOrderTimeoutMin,
+        settings.autoCancelStaleOrders,
+        freshEntryPriceBySymbol
+      );
+      staleOrders.push(...stale);
+      if (cancelled.length > 0) {
+        const cancelledIds = new Set(cancelled.map((o) => o.id));
+        groupState.openOrders = groupState.openOrders.filter((o) => !cancelledIds.has(o.id));
+        groupState.openOrdersBySymbol = buildOpenOrdersBySymbol(groupState.openOrders);
+      }
+    }
     if (staleOrders.length > 0) {
       console.warn(`[runTradingCycle] ${staleOrders.length} orden(es) BUY huérfana(s)/desalineada(s) detectada(s): ${staleOrders.map(({ order, reason }) => `${order.symbol}(${order.id}, ${reason})`).join(', ')}`);
-    }
-    if (cancelledStaleOrders.length > 0) {
-      const cancelledIds = new Set(cancelledStaleOrders.map((o) => o.id));
-      openOrders = openOrders.filter((o) => !cancelledIds.has(o.id));
     }
 
     // Refresca la caché de estado de Alpaca (cuenta, posiciones, órdenes abiertas) que usa
     // /api/trading/status, para que el siguiente poll del dashboard no repita estas llamadas.
-    // Ya refleja las cancelaciones de arriba. Las decisiones de trading de abajo SIEMPRE usan
-    // los valores recién obtenidos, no la caché.
+    // Sigue siendo solo de 'aptos' (la cuenta "principal" que ya mostraba el sidebar del
+    // dashboard antes de esta fase - rediseñar esa UI a multi-cuenta queda fuera de alcance,
+    // 'observados' ya es visible en el tab "Operaciones" vía operationsSync.ts). Ya refleja
+    // las cancelaciones de arriba. Las decisiones de trading de abajo SIEMPRE usan los
+    // valores recién obtenidos, no la caché.
     await Promise.all([
-      setCachedJson(redis, ALPACA_ACCOUNT_CACHE_KEY, account, ALPACA_ACCOUNT_CACHE_TTL_SECONDS),
-      setCachedJson(redis, ALPACA_POSITIONS_CACHE_KEY, positions, ALPACA_POSITIONS_CACHE_TTL_SECONDS),
-      setCachedJson(redis, ALPACA_OPEN_ORDERS_CACHE_KEY, openOrders, ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_ACCOUNT_CACHE_KEY, aptosState.account, ALPACA_ACCOUNT_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_POSITIONS_CACHE_KEY, Array.from(aptosState.positionsBySymbol.values()), ALPACA_POSITIONS_CACHE_TTL_SECONDS),
+      setCachedJson(redis, ALPACA_OPEN_ORDERS_CACHE_KEY, aptosState.openOrders, ALPACA_OPEN_ORDERS_CACHE_TTL_SECONDS),
     ]).catch((error) => {
       console.warn('No se pudo refrescar la caché de Alpaca en Redis:', error instanceof Error ? error.message : error);
     });
-
-    const openOrdersBySymbol = new Map<string, AlpacaOrder[]>();
-    for (const order of openOrders) {
-      const list = openOrdersBySymbol.get(order.symbol) ?? [];
-      list.push(order);
-      openOrdersBySymbol.set(order.symbol, list);
-    }
 
     // Tarea de eficiencia (2026-06-21): Claude antes se consultaba para los 27 símbolos en
     // cada ciclo (o, como mínimo, 1 vez por día aunque no hubiera BUYs, vía el viejo gate de
@@ -332,13 +422,19 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
     for (let i = 0; i < WATCHLIST.length; i++) {
       const symbol = WATCHLIST[i];
       const technicalSignal = signals[i].signal;
+      const classification = classifications[symbol] ?? 'apto';
+      // Grupo de cuenta real de ESTE símbolo según su clasificación actual (Fase Operaciones
+      // multi-cuenta, ruteo real) - posición/orden pendiente se chequean en la cuenta que
+      // efectivamente va a ejecutar, no en un mapa global de una sola cuenta.
+      const groupState = groupStates.get(classificationToAccountGroup(classification));
       if (technicalSignal === 'BUY') {
-        if ((classifications[symbol] ?? 'apto') === 'bloqueado') continue;
-        if (positionsBySymbol.has(symbol)) continue;
-        if ((openOrdersBySymbol.get(symbol) ?? []).some((o) => o.side === 'buy')) continue;
+        if (classification === 'bloqueado') continue;
+        if (!groupState) continue; // sin cuenta real para ejecutar este ciclo
+        if (groupState.positionsBySymbol.has(symbol)) continue;
+        if ((groupState.openOrdersBySymbol.get(symbol) ?? []).some((o) => o.side === 'buy')) continue;
         buyCandidateIndexes.push(i);
       } else if (technicalSignal === 'SELL') {
-        if (!positionsBySymbol.has(symbol)) continue;
+        if (!groupState?.positionsBySymbol.has(symbol)) continue;
         sellCandidateIndexes.push(i);
       }
     }
@@ -477,17 +573,20 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           }
         }
 
-        const position = positionsBySymbol.get(symbol);
-        const symbolOpenOrders = openOrdersBySymbol.get(symbol) ?? [];
-
         // Grupo de cuenta derivado de la clasificación ACTUAL del símbolo (Fase Operaciones
-        // multi-cuenta) - solo etiqueta trading_signals/trading_orders.account_group para que
-        // la tab "Operaciones" pueda filtrar; NO rutea la orden real a esa cuenta todavía
-        // (sigue siendo la única cuenta de ALPACA_API_KEY/SECRET/BASE_URL). Reusa el mismo
-        // snapshot de clasificaciones que el filtro de candidatos BUY de Claude (arriba), en
-        // vez de pedirlo de nuevo por símbolo.
+        // multi-cuenta, ruteo real 2026-06-25) - determina la cuenta Alpaca REAL contra la
+        // que se ejecuta este símbolo (`groupState`, ver `buildGroupTradingStates` arriba),
+        // además de etiquetar trading_signals/trading_orders.account_group para la tab
+        // "Operaciones". Reusa el mismo snapshot de clasificaciones que el filtro de
+        // candidatos BUY/SELL de Claude (arriba), en vez de pedirlo de nuevo por símbolo.
+        // `groupState` es `undefined` si esa cuenta no tiene credenciales configuradas (hoy,
+        // 'bloqueados') o si su fetch falló este ciclo - en ese caso no hay dónde ejecutar
+        // una orden real para este símbolo, sin importar la señal técnica.
         const classification = classifications[symbol] ?? 'apto';
         const accountGroup = classificationToAccountGroup(classification);
+        const groupState = groupStates.get(accountGroup);
+        const position = groupState?.positionsBySymbol.get(symbol);
+        const symbolOpenOrders = groupState?.openOrdersBySymbol.get(symbol) ?? [];
 
         const signalId = await saveSignal(pool, signal, 'main', '1Day', accountGroup);
 
@@ -514,104 +613,115 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
           // señales y evaluaciones de IA ya se calcularon/guardaron arriba normalmente.
           actions.push({ type: 'TRADING_DISABLED', symbol });
         } else if (signal.signal === 'BUY') {
-          const estimatedOrderValue = account.equity * settings.riskProfile.positionSizePct;
-
-          // Pre-trade check unificado (Fase Operaciones multi-cuenta) - reemplaza la cadena
-          // de ifs anterior (clasificación/posición/orden pendiente/máx. posiciones) por una
-          // sola función con reason codes explícitos. Fix del bug de duplicación: antes se
-          // chequeaba "¿alguna orden abierta?" sin filtrar por lado; PENDING_BUY_ORDER filtra
-          // específicamente órdenes side='buy', y queda visible en NO_ACTION.reason para la UI.
-          const buyCheck = await canPlaceBuyOrder(pool, symbol, accountGroup, {
-            position,
-            openOrders: symbolOpenOrders,
-            openPositionsCount,
-            maxPositions: settings.riskProfile.maxPositions,
-            equity: account.equity,
-            positionSizePct: settings.riskProfile.positionSizePct,
-            estimatedOrderValue,
-          });
-
-          if (!buyCheck.allowed) {
-            console.log(`[${symbol}] BUY bloqueado: ${buyCheck.reason}${buyCheck.orderId ? ` (orden pendiente ${buyCheck.orderId})` : ''}`);
-            actions.push({ type: 'NO_ACTION', symbol, reason: buyCheck.reason! });
-          } else if (assessment?.recommendation === 'avoid') {
-            // `assessment` acá es siempre el resultado EN MEMORIA de la llamada a Claude de
-            // este mismo ciclo (`assessWatchlist`, recomendación cruda 'buy'|'hold'|'avoid'),
-            // nunca el valor persistido con sufijo '-fresh'/'-stale'/'not-evaluated' de
-            // ai_assessments - el gate nunca lee esa columna, así que no puede llegar acá un
-            // valor "viejo" o sin evaluar; no hace falta chequeo extra de estado.
-            actions.push({ type: 'AI_BLOCKED', symbol, reason: assessment.rationale });
+          if (!groupState) {
+            // Sin cuenta real configurada/disponible este ciclo para el grupo de este símbolo
+            // (hoy, 'bloqueados' - que de todas formas nunca llega acá, ver hard-block de
+            // SYMBOL_BLOCKED_MANUAL en canPlaceBuyOrder más abajo - o un fallo puntual de
+            // Alpaca en `buildGroupTradingStates`). No hay dónde ejecutar la orden.
+            actions.push({ type: 'NO_ACTION', symbol, reason: 'SIN_CUENTA_CONFIGURADA' });
           } else {
-            const positionValue = estimatedOrderValue;
-            // Ajusta qty si excede el buying power disponible (ocurre con flujo_de_caja
-            // cuando hay >13 posiciones abiertas y se empieza a usar margen). Usa livePrice
-            // (no signal.price) para que el tamaño en dólares refleje el precio real de hoy,
-            // no el cierre de la vela diaria.
-            let qty = Math.floor(positionValue / livePrice);
-            if (qty > 0 && qty * livePrice > account.buyingPower) {
-              qty = Math.floor(account.buyingPower / livePrice);
-            }
+            const estimatedOrderValue = groupState.account.equity * settings.riskProfile.positionSizePct;
 
-            if (qty < 1) {
-              actions.push({
-                type: 'SKIPPED',
-                symbol,
-                reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${livePrice.toFixed(2)}, buyingPower=$${account.buyingPower.toFixed(0)})`,
-              });
+            // Pre-trade check unificado (Fase Operaciones multi-cuenta) - reemplaza la cadena
+            // de ifs anterior (clasificación/posición/orden pendiente/máx. posiciones) por una
+            // sola función con reason codes explícitos. Fix del bug de duplicación: antes se
+            // chequeaba "¿alguna orden abierta?" sin filtrar por lado; PENDING_BUY_ORDER filtra
+            // específicamente órdenes side='buy', y queda visible en NO_ACTION.reason para la UI.
+            const buyCheck = await canPlaceBuyOrder(pool, symbol, accountGroup, {
+              position,
+              openOrders: symbolOpenOrders,
+              openPositionsCount: groupState.openPositionsCount,
+              maxPositions: settings.riskProfile.maxPositions,
+              equity: groupState.account.equity,
+              positionSizePct: settings.riskProfile.positionSizePct,
+              estimatedOrderValue,
+            });
+
+            if (!buyCheck.allowed) {
+              console.log(`[${symbol}] BUY bloqueado: ${buyCheck.reason}${buyCheck.orderId ? ` (orden pendiente ${buyCheck.orderId})` : ''}`);
+              actions.push({ type: 'NO_ACTION', symbol, reason: buyCheck.reason! });
+            } else if (assessment?.recommendation === 'avoid') {
+              // `assessment` acá es siempre el resultado EN MEMORIA de la llamada a Claude de
+              // este mismo ciclo (`assessWatchlist`, recomendación cruda 'buy'|'hold'|'avoid'),
+              // nunca el valor persistido con sufijo '-fresh'/'-stale'/'not-evaluated' de
+              // ai_assessments - el gate nunca lee esa columna, así que no puede llegar acá un
+              // valor "viejo" o sin evaluar; no hace falta chequeo extra de estado.
+              actions.push({ type: 'AI_BLOCKED', symbol, reason: assessment.rationale });
             } else {
-              if (account.cash < qty * livePrice) {
-                console.log(`[${symbol}] Usando margen: cash=$${account.cash.toFixed(0)}, orden=$${(qty * livePrice).toFixed(0)}, buyingPower=$${account.buyingPower.toFixed(0)}`);
+              const positionValue = estimatedOrderValue;
+              // Ajusta qty si excede el buying power disponible (ocurre con flujo_de_caja
+              // cuando hay >13 posiciones abiertas y se empieza a usar margen). Usa livePrice
+              // (no signal.price) para que el tamaño en dólares refleje el precio real de hoy,
+              // no el cierre de la vela diaria.
+              let qty = Math.floor(positionValue / livePrice);
+              if (qty > 0 && qty * livePrice > groupState.account.buyingPower) {
+                qty = Math.floor(groupState.account.buyingPower / livePrice);
               }
-              // Orden límite al precio estimado de entrada (no a mercado), con TP/SL relativos a ese precio.
-              // Si el precio real de hoy (livePrice) ya está por debajo del estimado, conviene tomar el
-              // menor de los dos (mejor precio de entrada para el comprador) en lugar de esperar a que
-              // suba al estimado - 2026-06-23: antes comparaba contra signal.price (cierre de la vela
-              // diaria, desactualizado durante la sesión), lo que dejó pasar una compra de GOOGL en medio
-              // de una caída intradía del 6% que el precio "congelado" no reflejaba (ver nota de
-              // getLatestQuotes más arriba).
-              const entryPrice = signal.estimatedEntryPrice !== null
-                ? Math.min(signal.estimatedEntryPrice, livePrice)
-                : livePrice;
 
-              // Orden límite simple, sin TP/SL. La posición se cierra únicamente cuando
-              // la condición activa emite señal SELL (closePosition más abajo).
-              const order = await placeBuyOrder(alpacaClient, {
-                symbol,
-                qty,
-                limitPrice: entryPrice,
-              });
+              if (qty < 1) {
+                actions.push({
+                  type: 'SKIPPED',
+                  symbol,
+                  reason: `Tamaño calculado < 1 acción ($${positionValue.toFixed(2)} / $${livePrice.toFixed(2)}, buyingPower=$${groupState.account.buyingPower.toFixed(0)})`,
+                });
+              } else {
+                if (groupState.account.cash < qty * livePrice) {
+                  console.log(`[${symbol}] Usando margen (cuenta ${accountGroup}): cash=$${groupState.account.cash.toFixed(0)}, orden=$${(qty * livePrice).toFixed(0)}, buyingPower=$${groupState.account.buyingPower.toFixed(0)}`);
+                }
+                // Orden límite al precio estimado de entrada (no a mercado), con TP/SL relativos a ese precio.
+                // Si el precio real de hoy (livePrice) ya está por debajo del estimado, conviene tomar el
+                // menor de los dos (mejor precio de entrada para el comprador) en lugar de esperar a que
+                // suba al estimado - 2026-06-23: antes comparaba contra signal.price (cierre de la vela
+                // diaria, desactualizado durante la sesión), lo que dejó pasar una compra de GOOGL en medio
+                // de una caída intradía del 6% que el precio "congelado" no reflejaba (ver nota de
+                // getLatestQuotes más arriba).
+                const entryPrice = signal.estimatedEntryPrice !== null
+                  ? Math.min(signal.estimatedEntryPrice, livePrice)
+                  : livePrice;
 
-              await saveOrder(pool, {
-                signalId,
-                symbol,
-                side: 'buy',
-                qty,
-                orderType: 'simple',
-                alpacaOrderId: order.id,
-                status: order.status,
-                raw: order,
-                accountGroup,
-              });
+                // Orden límite simple, sin TP/SL. La posición se cierra únicamente cuando
+                // la condición activa emite señal SELL (closePosition más abajo). Se ejecuta
+                // contra la cuenta REAL del grupo de este símbolo (Fase Operaciones multi-cuenta,
+                // ruteo real) - antes siempre `alpacaClient` (la única cuenta de aptos).
+                const order = await placeBuyOrder(groupState.client, {
+                  symbol,
+                  qty,
+                  limitPrice: entryPrice,
+                });
 
-              invalidateBuyCheck(accountGroup, symbol);
-              actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id });
-              tradeAlertEntries.push({
-                type: 'BUY',
-                symbol,
-                qty,
-                price: entryPrice,
-                orderId: order.id,
-                signal,
-                bars: barsBySymbol.get(symbol) ?? [],
-                ai: assessment
-                  ? { recommendation: assessment.recommendation, score: assessment.score, confidence: assessment.confidence, rationale: assessment.rationale }
-                  : null,
-              });
-              openPositionsCount += 1;
+                await saveOrder(pool, {
+                  signalId,
+                  symbol,
+                  side: 'buy',
+                  qty,
+                  orderType: 'simple',
+                  alpacaOrderId: order.id,
+                  status: order.status,
+                  raw: order,
+                  accountGroup,
+                });
+
+                invalidateBuyCheck(accountGroup, symbol);
+                actions.push({ type: 'OPEN_POSITION', symbol, qty, takeProfitPrice: null, stopLossPrice: null, alpacaOrderId: order.id, accountGroup });
+                tradeAlertEntries.push({
+                  type: 'BUY',
+                  symbol,
+                  qty,
+                  price: entryPrice,
+                  orderId: order.id,
+                  accountGroup,
+                  signal,
+                  bars: barsBySymbol.get(symbol) ?? [],
+                  ai: assessment
+                    ? { recommendation: assessment.recommendation, score: assessment.score, confidence: assessment.confidence, rationale: assessment.rationale }
+                    : null,
+                });
+                groupState.openPositionsCount += 1;
+              }
             }
           }
         } else if (signal.signal === 'SELL') {
-          if (!position) {
+          if (!groupState || !position) {
             actions.push({ type: 'NO_ACTION', symbol, reason: 'Sin posición abierta para cerrar' });
           } else if (assessment?.recommendation === 'avoid') {
             // Veto real sobre SELL (decisión explícita del usuario, 2026-06-23 - antes Claude
@@ -621,11 +731,13 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
             // sigue SELL en el próximo ciclo, vuelve a evaluarse (sin caché de "ya vetado").
             actions.push({ type: 'AI_BLOCKED_SELL', symbol, reason: assessment.rationale });
           } else {
+            // Se ejecuta contra la cuenta REAL del grupo de este símbolo (ver arriba) - antes
+            // siempre `alpacaClient` (la única cuenta de aptos).
             for (const openOrder of symbolOpenOrders) {
-              await cancelOrder(alpacaClient, openOrder.id);
+              await cancelOrder(groupState.client, openOrder.id);
             }
 
-            const closeOrder = await closePosition(alpacaClient, symbol);
+            const closeOrder = await closePosition(groupState.client, symbol);
 
             await saveOrder(pool, {
               signalId,
@@ -640,13 +752,14 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
             });
 
             invalidateBuyCheck(accountGroup, symbol);
-            actions.push({ type: 'CLOSE_POSITION', symbol, qty: position.qty, alpacaOrderId: closeOrder.id });
+            actions.push({ type: 'CLOSE_POSITION', symbol, qty: position.qty, alpacaOrderId: closeOrder.id, accountGroup });
             tradeAlertEntries.push({
               type: 'SELL',
               symbol,
               qty: position.qty,
               price: signal.price,
               orderId: closeOrder.id,
+              accountGroup,
               signal,
               bars: barsBySymbol.get(symbol) ?? [],
               // Desde 2026-06-23 Claude SÍ puede evaluar candidatos SELL (ver arriba) - si hubo
@@ -656,7 +769,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
                 ? { recommendation: assessment.recommendation, score: assessment.score, confidence: assessment.confidence, rationale: assessment.rationale }
                 : null,
             });
-            openPositionsCount -= 1;
+            groupState.openPositionsCount -= 1;
           }
         } else {
           actions.push({ type: 'NO_ACTION', symbol, reason: 'Señal HOLD' });
@@ -699,6 +812,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       const snapshot = await putJsonSnapshot(minioClient, minioConfig, key, {
         generatedAt: new Date().toISOString(),
         account,
+        accountsByGroup,
         signals,
         actions,
         assessments: Array.from(assessments.values()),
@@ -708,7 +822,7 @@ export async function runTradingCycle(): Promise<TradingCycleResult> {
       console.error('No se pudo guardar el snapshot del ciclo de trading en MinIO:', error);
     }
 
-    return { account, signals, actions, snapshotKey };
+    return { account, accountsByGroup, signals, actions, snapshotKey };
   } finally {
     await redis.quit();
     await pool.end();

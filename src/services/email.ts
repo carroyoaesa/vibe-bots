@@ -4,6 +4,7 @@ import { SignalResult } from '../strategy/signals';
 import { OhlcBar } from '../strategy/conditions';
 import { buildChartSeries } from '../strategy/chart';
 import { renderSymbolChartPng } from './chartImage';
+import { AccountGroup } from './alpaca';
 
 export interface TradeAlertAiInfo {
   recommendation: string;
@@ -18,6 +19,8 @@ export interface TradeAlertEntry {
   qty: number;
   price: number;
   orderId: string;
+  /** Cuenta Alpaca real donde se ejecutó la orden (Fase Operaciones multi-cuenta, ruteo real 2026-06-25). */
+  accountGroup: AccountGroup;
   signal: SignalResult;
   /** Velas usadas para recalcular la señal este ciclo - insumo del gráfico adjunto. */
   bars: OhlcBar[];
@@ -51,10 +54,10 @@ function fmtPrice(value: number | null): string {
 }
 
 function buildEntryText(entry: TradeAlertEntry): string {
-  const { signal, type, symbol, qty, price, orderId, ai } = entry;
+  const { signal, type, symbol, qty, price, orderId, accountGroup, ai } = entry;
   const header = type === 'BUY'
-    ? `🟢 BUY ${symbol}: ${qty} acciones a ~$${price.toFixed(2)} (orden ${orderId})`
-    : `🔴 SELL ${symbol}: cierre de ${qty} acciones (orden ${orderId})`;
+    ? `🟢 BUY ${symbol} (cuenta: ${accountGroup}): ${qty} acciones a ~$${price.toFixed(2)} (orden ${orderId})`
+    : `🔴 SELL ${symbol} (cuenta: ${accountGroup}): cierre de ${qty} acciones (orden ${orderId})`;
 
   const lines = [header, ''];
   lines.push(type === 'BUY' ? `Condición de compra: ${signal.buyConditionLabel}` : `Condición de venta: ${signal.sellConditionLabel}`);
@@ -72,11 +75,11 @@ function buildEntryText(entry: TradeAlertEntry): string {
 }
 
 function buildEntryHtml(entry: TradeAlertEntry, cid: string | null): string {
-  const { signal, type, symbol, qty, price, orderId, ai } = entry;
+  const { signal, type, symbol, qty, price, orderId, accountGroup, ai } = entry;
   const headerEmoji = type === 'BUY' ? '🟢' : '🔴';
   const actionLine = type === 'BUY'
-    ? `${qty} acciones a ~$${price.toFixed(2)} (orden ${escapeHtml(orderId)})`
-    : `cierre de ${qty} acciones (orden ${escapeHtml(orderId)})`;
+    ? `${qty} acciones a ~$${price.toFixed(2)} (cuenta: ${escapeHtml(accountGroup)}, orden ${escapeHtml(orderId)})`
+    : `cierre de ${qty} acciones (cuenta: ${escapeHtml(accountGroup)}, orden ${escapeHtml(orderId)})`;
   const conditionLine = type === 'BUY'
     ? `Condición de compra: ${escapeHtml(signal.buyConditionLabel)}`
     : `Condición de venta: ${escapeHtml(signal.sellConditionLabel)}`;

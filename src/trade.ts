@@ -6,10 +6,10 @@ function describeAction(action: Awaited<ReturnType<typeof runTradingCycle>>['act
       const tpsl = action.takeProfitPrice !== null && action.stopLossPrice !== null
         ? `TP $${action.takeProfitPrice.toFixed(2)} / SL $${action.stopLossPrice.toFixed(2)}`
         : 'sin bracket TP/SL';
-      return `🟢 BUY ${action.symbol}: ${action.qty} acciones (${tpsl}) - orden ${action.alpacaOrderId}`;
+      return `🟢 BUY ${action.symbol} (cuenta: ${action.accountGroup}): ${action.qty} acciones (${tpsl}) - orden ${action.alpacaOrderId}`;
     }
     case 'CLOSE_POSITION':
-      return `🔴 SELL ${action.symbol}: cierre de ${action.qty} acciones - orden ${action.alpacaOrderId ?? 'n/a'}`;
+      return `🔴 SELL ${action.symbol} (cuenta: ${action.accountGroup}): cierre de ${action.qty} acciones - orden ${action.alpacaOrderId ?? 'n/a'}`;
     case 'AI_BLOCKED':
       return `🤖🚫 ${action.symbol}: BUY vetado por IA (${action.reason})`;
     case 'AI_BLOCKED_SELL':
@@ -31,7 +31,14 @@ async function main() {
 
   const result = await runTradingCycle();
 
-  console.log(`Cuenta: equity $${result.account.equity.toFixed(2)} | cash $${result.account.cash.toFixed(2)} | buying power $${result.account.buyingPower.toFixed(2)}\n`);
+  for (const [group, account] of Object.entries(result.accountsByGroup)) {
+    if (!account) {
+      console.log(`Cuenta ${group}: sin credenciales configuradas`);
+      continue;
+    }
+    console.log(`Cuenta ${group}: equity $${account.equity.toFixed(2)} | cash $${account.cash.toFixed(2)} | buying power $${account.buyingPower.toFixed(2)}`);
+  }
+  console.log('');
 
   console.log('Señales:');
   result.signals.forEach((signal) => {

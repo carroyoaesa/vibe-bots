@@ -62,6 +62,7 @@ async function main() {
     qty: 1,
     price: signal.estimatedEntryPrice ?? signal.price,
     orderId: 'test-1234',
+    accountGroup: 'aptos',
     signal,
     bars,
     ai: {
