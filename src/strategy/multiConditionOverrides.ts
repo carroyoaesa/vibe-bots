@@ -71,6 +71,25 @@ export const MULTI_CONDITION_OVERRIDES: Record<string, MultiConditionOverride> =
   MU: { tier: 3, buyExpr: 'OR(sma_cross_20_50+rsi_reversal_30_70+stochastic_cross)', sellExpr: '(sma_cross_10_30|williams_r_reversal)&bollinger_breakout' },
   SCHG: { tier: 3, buyExpr: '(bollinger_breakout&donchian_breakout_20)|stochastic_cross', sellExpr: '(sma_cross_10_30|williams_r_reversal)&trend_pullback_sma50' },
   SHW: { tier: 3, buyExpr: '(bollinger_reversion|stochastic_cross)&rsi_reversal_30_70', sellExpr: 'AND(rsi_reversal_30_70+williams_r_reversal+cci_reversal)' },
+
+  // --- Fase 14 (2026-07-02): portafolio de `smart-investor` agregado al watchlist (ver
+  // watchlist.ts), mismo reporte de 3 tiers de `bots/backtests` corrido para estos 12
+  // símbolos nuevos (NVDA/GOOGL ya estaban en el watchlist y ya tenían override propio -
+  // no se tocan). Los 12 recomendaron tier 3 con muestra sólida (7-40 trades, WR 62-100%,
+  // mejora real de +38 a +738 puntos de retorno sobre tier 2, `botStatus.cls === 'usar'`
+  // para los 12 - ver `output/report_data.json` de ese repo, generado 2026-07-02).
+  AU: { tier: 3, buyExpr: 'OR(macd_cross+rsi_reversal_30_70+cci_reversal)', sellExpr: '(rsi_reversal_30_70|trend_pullback_sma50)&cci_reversal' },
+  HWM: { tier: 3, buyExpr: 'OR(sma_cross_20_50+stochastic_cross+williams_r_reversal)', sellExpr: '(rsi_reversal_30_70|stochastic_cross)&cci_reversal' },
+  EZPW: { tier: 3, buyExpr: 'OR(sma_cross_20_50+williams_r_reversal+cci_reversal)', sellExpr: '(stochastic_cross&trend_pullback_sma50)|rsi_reversal_30_70' },
+  BNY: { tier: 3, buyExpr: 'OR(bollinger_reversion+bollinger_breakout+donchian_breakout_20)', sellExpr: '(rsi_reversal_30_70&trend_pullback_sma50)|sma_cross_20_50' },
+  CASY: { tier: 3, buyExpr: 'OR(sma_cross_10_30+stochastic_cross+donchian_breakout_20)', sellExpr: '(macd_cross|stochastic_cross)&cci_reversal' },
+  WELL: { tier: 3, buyExpr: 'OR(bollinger_reversion+stochastic_cross+cci_reversal)', sellExpr: '(sma_cross_10_30|macd_cross)&bollinger_breakout' },
+  FTI: { tier: 3, buyExpr: 'OR(sma_cross_10_30+sma_cross_20_50+bollinger_reversion)', sellExpr: '(stochastic_cross|donchian_breakout_20)&rsi_reversal_30_70' },
+  LLY: { tier: 3, buyExpr: 'OR(rsi_reversal_30_70+bollinger_reversion+cci_reversal)', sellExpr: '(macd_cross&donchian_breakout_20)|sma_cross_20_50' },
+  CW: { tier: 3, buyExpr: '(sma_cross_20_50&williams_r_reversal)|bollinger_reversion', sellExpr: '(bollinger_breakout|trend_pullback_sma50)&rsi_reversal_30_70' },
+  COKE: { tier: 3, buyExpr: 'OR(ema_cross_12_26+macd_cross+rsi_reversal_30_70)', sellExpr: '(rsi_reversal_30_70|cci_reversal)&stochastic_cross' },
+  APH: { tier: 3, buyExpr: 'OR(williams_r_reversal+cci_reversal+donchian_breakout_20)', sellExpr: '(rsi_reversal_30_70&donchian_breakout_20)|sma_cross_10_30' },
+  WMB: { tier: 3, buyExpr: 'OR(bollinger_reversion+williams_r_reversal+donchian_breakout_20)', sellExpr: '(rsi_reversal_30_70|cci_reversal)&stochastic_cross' },
 };
 
 // Fail-loud: un typo acá es un bug de autoría estática, no una falla externa - tiene que

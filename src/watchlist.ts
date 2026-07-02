@@ -7,11 +7,19 @@
 // agregan: GOLD porque Alpaca resuelve hoy ese ticker a "Gold.com, Inc." (no la Barrick Gold del
 // histórico backtested); los otros 4 por volumen diario muy bajo (198-2.542 acciones/día, riesgo
 // de slippage/fills pobres) - mismo motivo de iliquidez que los excluyó originalmente el 2026-06-14.
+//
+// Fase 14 (2026-07-02): se agregan 12 símbolos del portafolio de mediano/largo plazo construido en
+// `smart-investor` (score orientado a inversor extranjero - 30% retención de dividendos, 0% ganancia
+// de capital -, sin momentum parabólico, diversificado en 10 sectores). NVDA y GOOGL ya estaban en el
+// watchlist (y ya "apto") - no se duplican. Mismo procedimiento que Fase 8: `npm run backfill-history`
+// + `bots/backtests` (combo-matrix/multi-matrix/triple-matrix) para elegir condición de compra/venta
+// por símbolo antes de dejarlos operar con la condición default.
 export const WATCHLIST = [
   'AAPL', 'MSFT', 'SPY', 'NVDA',
   'REG', 'TOL', 'SCHE', 'SCHF', 'AMZN', 'XLP', 'XLU', 'XMMO', 'VUG',
   'TSM', 'GOOGL', 'SCHD', 'MS', 'SPMO', 'QQQM', 'SOXQ',
   'AVGO', 'HD', 'LOW', 'MAIN', 'MU', 'SCHG', 'SHW',
+  'AU', 'HWM', 'EZPW', 'BNY', 'CASY', 'WELL', 'FTI', 'LLY', 'CW', 'COKE', 'APH', 'WMB',
 ];
 
 // Subconjunto de WATCHLIST que son ETFs (el resto se considera "acciones" en el front end).
